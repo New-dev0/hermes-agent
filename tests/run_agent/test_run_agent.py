@@ -1077,6 +1077,12 @@ class TestBuildSystemPrompt:
         prompt = agent_with_memory_tool._build_system_prompt()
         assert MEMORY_GUIDANCE in prompt
 
+    def test_self_learning_guidance_when_learning_tools_loaded(self, agent_with_memory_tool):
+        from agent.prompt_builder import SELF_LEARNING_GUIDANCE
+
+        prompt = agent_with_memory_tool._build_system_prompt()
+        assert SELF_LEARNING_GUIDANCE in prompt
+
     def test_no_memory_guidance_without_tool(self, agent):
         from agent.prompt_builder import MEMORY_GUIDANCE
 

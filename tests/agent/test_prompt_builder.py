@@ -24,6 +24,7 @@ from agent.prompt_builder import (
     TOOL_USE_ENFORCEMENT_MODELS,
     OPENAI_MODEL_EXECUTION_GUIDANCE,
     MEMORY_GUIDANCE,
+    SELF_LEARNING_GUIDANCE,
     SESSION_SEARCH_GUIDANCE,
     PLATFORM_HINTS,
     WSL_ENVIRONMENT_HINT,
@@ -47,6 +48,13 @@ class TestGuidanceConstants:
     def test_session_search_guidance_is_simple_cross_session_recall(self):
         assert "relevant cross-session context exists" in SESSION_SEARCH_GUIDANCE
         assert "recent turns of the current session" not in SESSION_SEARCH_GUIDANCE
+
+    def test_self_learning_guidance_balances_learning_and_hygiene(self):
+        assert "Self-learning loop" in SELF_LEARNING_GUIDANCE
+        assert "User model" in SELF_LEARNING_GUIDANCE
+        assert "Procedure model" in SELF_LEARNING_GUIDANCE
+        assert "Skill maintenance" in SELF_LEARNING_GUIDANCE
+        assert "do not save transient task progress" in SELF_LEARNING_GUIDANCE
 
 
 # =========================================================================
