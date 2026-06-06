@@ -530,24 +530,33 @@ class TestExternalDriftGuard:
         assert path.stat().st_size == original_size
 
     def test_drift_backup_filename_is_unique_per_invocation(self, store):
-        """Two drift refusals close together must not collide on bak.<ts>.
-
-        If two refusals share the same epoch second, the second call would
-        overwrite the first .bak. The current implementation accepts that
-        — both files describe the same on-disk state — but pin the path
-        format here so any future change has to think about it.
-        """
+        """Two drift refusals close together must not collide on bak.<ts>."""
         store.add("memory", "Initial.")
-        self._plant_drift(store)
+        path = self._plant_drift(store)
 
         r1 = store.replace("memory", "Initial", "Replacement.")
-        r2 = store.add("memory", "Another.")
         assert r1.get("drift_backup")
-        assert r2.get("drift_backup")
-        # Same epoch second is the expected collision case — both point
-        # at the same snapshot. Different second is also fine.
         assert ".bak." in r1["drift_backup"]
+        first_backup = Path(r1["drift_backup"])
+        assert first_backup.exists()
+        assert "Vendor Master" in first_backup.read_text(encoding="utf-8")
+
+        # Simulate an external writer changing the drifted file between two
+        # refused memory mutations. The second refusal must preserve a second
+        # recoverable snapshot rather than overwriting the first one.
+        path.write_text(
+            path.read_text(encoding="utf-8") + "\n\n## Second Drift Marker\nnew bytes",
+            encoding="utf-8",
+        )
+
+        r2 = store.add("memory", "Another.")
+        assert r2.get("drift_backup")
         assert ".bak." in r2["drift_backup"]
+        second_backup = Path(r2["drift_backup"])
+        assert second_backup.exists()
+        assert second_backup != first_backup
+        assert "Second Drift Marker" not in first_backup.read_text(encoding="utf-8")
+        assert "Second Drift Marker" in second_backup.read_text(encoding="utf-8")
 
 
 # =========================================================================

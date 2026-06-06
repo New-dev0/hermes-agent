@@ -558,8 +558,9 @@ class MemoryStore:
 
         # Drift confirmed — snapshot the file so the operator can recover
         # whatever the external writer added, then return the .bak path so
-        # the caller can refuse the mutation.
-        ts = int(time.time())
+        # the caller can refuse the mutation. Use nanosecond resolution so
+        # repeated refusals in the same second cannot overwrite each other.
+        ts = time.time_ns()
         bak_path = path.with_suffix(path.suffix + f".bak.{ts}")
         try:
             bak_path.write_text(raw, encoding="utf-8")
