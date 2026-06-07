@@ -1532,6 +1532,11 @@ def format_process_notification(evt: dict) -> "str | None":
 # Registry -- the "process" tool schema + handler
 # ---------------------------------------------------------------------------
 from tools.registry import registry, tool_error
+from tools.shell_command_policy import (
+    command_execution_disabled,
+    command_execution_disabled_result,
+    command_execution_enabled,
+)
 
 PROCESS_SCHEMA = {
     "name": "process",
@@ -1579,6 +1584,9 @@ PROCESS_SCHEMA = {
 
 
 def _handle_process(args, **kw):
+    if command_execution_disabled():
+        return command_execution_disabled_result("process")
+
     task_id = kw.get("task_id")
     action = args.get("action", "")
     # Coerce to string — some models send session_id as an integer
@@ -1612,5 +1620,6 @@ registry.register(
     toolset="terminal",
     schema=PROCESS_SCHEMA,
     handler=_handle_process,
+    check_fn=command_execution_enabled,
     emoji="⚙️",
 )

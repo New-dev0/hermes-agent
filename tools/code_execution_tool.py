@@ -47,6 +47,10 @@ _IS_WINDOWS = platform.system() == "Windows"
 from typing import Any, Dict, List, Optional
 
 from tools.thread_context import propagate_context_to_thread
+from tools.shell_command_policy import (
+    command_execution_disabled,
+    command_execution_disabled_result,
+)
 
 # Availability gate.  On Windows we fall back to loopback TCP for the
 # sandbox RPC transport (AF_UNIX is unreliable on Windows Python) — see
@@ -199,6 +203,8 @@ def _scrub_child_env(source_env, is_passthrough=None, is_windows=None):
 
 def check_sandbox_requirements() -> bool:
     """Code execution sandbox requires a POSIX OS for Unix domain sockets."""
+    if command_execution_disabled():
+        return False
     if not SANDBOX_AVAILABLE:
         return False
     return True
@@ -1084,6 +1090,9 @@ def execute_code(
     Returns:
         JSON string with execution results.
     """
+    if command_execution_disabled():
+        return command_execution_disabled_result("execute_code")
+
     if not SANDBOX_AVAILABLE:
         return json.dumps({
             "error": "execute_code sandbox is unavailable in this environment. "

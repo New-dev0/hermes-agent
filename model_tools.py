@@ -30,6 +30,11 @@ import time
 from typing import Dict, Any, List, Optional, Tuple
 
 from tools.registry import discover_builtin_tools, registry
+from tools.shell_command_policy import (
+    COMMAND_EXECUTION_TOOL_NAMES,
+    command_execution_disabled,
+    command_execution_disabled_result,
+)
 from toolsets import resolve_toolset, validate_toolset
 
 logger = logging.getLogger(__name__)
@@ -390,6 +395,11 @@ def _compute_tool_definitions(
                     print(f"🚫 Disabled legacy toolset '{toolset_name}': {', '.join(legacy_tools)}")
             elif not quiet_mode:
                 print(f"⚠️  Unknown toolset: {toolset_name}")
+
+    # Deployment safety override: do not expose command execution tools unless
+    # explicitly re-enabled via HERMES_ENABLE_SHELL_COMMAND_TOOLS.
+    if command_execution_disabled():
+        tools_to_include.difference_update(COMMAND_EXECUTION_TOOL_NAMES)
 
     # Plugin-registered tools are now resolved through the normal toolset
     # path — validate_toolset() / resolve_toolset() / get_all_toolsets()
@@ -905,6 +915,9 @@ def handle_function_call(
     if not isinstance(function_args, dict):
         function_args = {}
     _tool_middleware_trace = list(tool_request_middleware_trace or [])
+
+    if command_execution_disabled() and function_name in COMMAND_EXECUTION_TOOL_NAMES:
+        return command_execution_disabled_result(function_name)
 
     # ── Tool Search bridge dispatch ──────────────────────────────────
     # tool_search and tool_describe are pure catalog reads — handle them

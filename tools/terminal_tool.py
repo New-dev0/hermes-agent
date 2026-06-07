@@ -74,6 +74,10 @@ from tools.tool_backend_helpers import (
     nous_tool_gateway_unavailable_message,
     resolve_modal_backend_state,
 )
+from tools.shell_command_policy import (
+    command_execution_disabled,
+    command_execution_disabled_result,
+)
 
 
 def _safe_parse_import_env(
@@ -1814,6 +1818,9 @@ def terminal_tool(
         # Note: force parameter is internal only, not exposed to model API
     """
     try:
+        if command_execution_disabled():
+            return command_execution_disabled_result("terminal")
+
         if not isinstance(command, str):
             logger.warning(
                 "Rejected invalid terminal command value: %s",
@@ -2382,6 +2389,9 @@ def terminal_tool(
 
 def check_terminal_requirements() -> bool:
     """Check if all requirements for the terminal tool are met."""
+    if command_execution_disabled():
+        return False
+
     try:
         config = _get_env_config()
         env_type = config["env_type"]
@@ -2588,6 +2598,9 @@ TERMINAL_SCHEMA = {
 
 
 def _handle_terminal(args, **kw):
+    if command_execution_disabled():
+        return command_execution_disabled_result("terminal")
+
     return terminal_tool(
         command=args.get("command"),
         background=args.get("background", False),
