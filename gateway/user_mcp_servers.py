@@ -15,7 +15,7 @@ import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_constants import get_hermes_home
 
@@ -29,6 +29,11 @@ DEFAULT_GBRAIN_TOOLS = (
     "put_page",
     "get_page",
     "list_pages",
+)
+
+DEFAULT_CONTEXT_FILES = (
+    ("SOUL.md", "Gateway SOUL.md"),
+    ("MEMORY.md", "Gateway MEMORY.md"),
 )
 
 _SOURCE_RE = re.compile(r"^myspace-[A-Za-z0-9][A-Za-z0-9_-]{0,95}$")
@@ -112,6 +117,38 @@ def _prompt_root() -> Path:
     return get_hermes_home() / "gateway" / "myspaces"
 
 
+def _context_files() -> Tuple[Tuple[str, str], ...]:
+    """Return server-managed prompt overlay files.
+
+    ``HERMES_GATEWAY_USER_CONTEXT_FILES`` accepts comma-separated
+    ``filename[:title]`` entries. Filenames are basenames only; path
+    separators are ignored by rejecting the entry.
+    """
+
+    configured = os.getenv("HERMES_GATEWAY_USER_CONTEXT_FILES", "").strip()
+    if not configured:
+        return DEFAULT_CONTEXT_FILES
+
+    files: List[Tuple[str, str]] = []
+    for item in configured.split(","):
+        raw = item.strip()
+        if not raw:
+            continue
+        filename, _, title = raw.partition(":")
+        filename = filename.strip()
+        if (
+            not filename
+            or filename in {".", ".."}
+            or "/" in filename
+            or "\\" in filename
+        ):
+            logger.warning("Gateway user context file ignored: %r", raw)
+            continue
+        label = title.strip() or f"Gateway {filename}"
+        files.append((filename, label))
+    return tuple(files) or DEFAULT_CONTEXT_FILES
+
+
 def _safe_child_path(root: Path, source_id: str, filename: str) -> Optional[Path]:
     try:
         root_resolved = root.resolve()
@@ -126,6 +163,16 @@ def _safe_child_path(root: Path, source_id: str, filename: str) -> Optional[Path
             filename,
         )
         return None
+
+
+def _render_placeholders(content: str, values: Dict[str, str]) -> str:
+    """Render simple server-side placeholders in gateway context files."""
+
+    def replace(match: re.Match[str]) -> str:
+        key = match.group(1).strip()
+        return values.get(key, match.group(0))
+
+    return re.sub(r"\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}", replace, content)
 
 
 def _load_prompt_file(path: Path, label: str) -> str:
@@ -151,7 +198,10 @@ def _load_prompt_file(path: Path, label: str) -> str:
     return content
 
 
-def build_user_prompt_context(source_id: Optional[str]) -> str:
+def build_user_prompt_context(
+    source_id: Optional[str],
+    placeholders: Optional[Dict[str, str]] = None,
+) -> str:
     """Load optional gateway-scoped SOUL.md / MEMORY.md overlays."""
 
     if not source_id or not _enabled("HERMES_GATEWAY_USER_CONTEXT_ENABLED", True):
@@ -159,15 +209,17 @@ def build_user_prompt_context(source_id: Optional[str]) -> str:
 
     root = _prompt_root()
     sections: List[str] = []
-    for filename, title in (
-        ("SOUL.md", "Gateway SOUL.md"),
-        ("MEMORY.md", "Gateway MEMORY.md"),
-    ):
+    values = dict(placeholders or {})
+    values.setdefault("source_id", source_id)
+    values.setdefault("gbrain_source_id", source_id)
+
+    for filename, title in _context_files():
         path = _safe_child_path(root, source_id, filename)
         if path is None:
             continue
         content = _load_prompt_file(path, f"{source_id}/{filename}")
         if content:
+            content = _render_placeholders(content, values)
             sections.append(f"## {title} ({source_id})\n\n{content}")
 
     if not sections:
@@ -184,7 +236,16 @@ def build_user_mcp_servers(gateway_session_key: Optional[str]) -> UserMcpRuntime
     """Build scoped GBrain MCP config for one gateway request."""
 
     source_id = derive_gbrain_source_id(gateway_session_key)
-    prompt_context = build_user_prompt_context(source_id)
+    server_name = _stable_server_name(source_id) if source_id else None
+    toolset = f"mcp-{server_name}" if server_name else None
+    prompt_context = build_user_prompt_context(
+        source_id,
+        {
+            "gateway_session_key": (gateway_session_key or "").strip(),
+            "mcp_server_name": server_name or "",
+            "mcp_toolset": toolset or "",
+        },
+    )
 
     if not source_id or not _enabled("HERMES_GBRAIN_MCP_ENABLED", True):
         return UserMcpRuntime(source_id=source_id, prompt_context=prompt_context)
@@ -193,8 +254,8 @@ def build_user_mcp_servers(gateway_session_key: Optional[str]) -> UserMcpRuntime
     if not command:
         return UserMcpRuntime(source_id=source_id, prompt_context=prompt_context)
 
-    server_name = _stable_server_name(source_id)
-    toolset = f"mcp-{server_name}"
+    assert server_name is not None
+    assert toolset is not None
     server_config: Dict[str, Any] = {
         "command": command,
         "args": ["serve"],

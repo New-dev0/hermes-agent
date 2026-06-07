@@ -48,12 +48,43 @@ def test_build_user_prompt_context_loads_gateway_files(tmp_path, monkeypatch):
 
     user_dir = tmp_path / "myspace-972"
     user_dir.mkdir()
-    (user_dir / "SOUL.md").write_text("You are Saiki.", encoding="utf-8")
-    (user_dir / "MEMORY.md").write_text("Shared ritual: midnight check-in.", encoding="utf-8")
+    (user_dir / "SOUL.md").write_text(
+        "You are Saiki for {{ source_id }} via {{mcp_toolset}}.",
+        encoding="utf-8",
+    )
+    (user_dir / "MEMORY.md").write_text(
+        "Shared ritual: midnight check-in. Unknown: {{still_unknown}}",
+        encoding="utf-8",
+    )
 
     runtime = build_user_mcp_servers("myspace-972")
 
     assert "Gateway SOUL.md (myspace-972)" in runtime.prompt_context
-    assert "You are Saiki." in runtime.prompt_context
+    assert "You are Saiki for myspace-972 via mcp-" in runtime.prompt_context
     assert "Gateway MEMORY.md (myspace-972)" in runtime.prompt_context
     assert "Shared ritual: midnight check-in." in runtime.prompt_context
+    assert "{{still_unknown}}" in runtime.prompt_context
+
+
+def test_build_user_prompt_context_loads_configured_gateway_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_GBRAIN_MCP_COMMAND", sys.executable)
+    monkeypatch.setenv("HERMES_GATEWAY_USER_CONTEXT_ROOT", str(tmp_path))
+    monkeypatch.setenv(
+        "HERMES_GATEWAY_USER_CONTEXT_FILES",
+        "SOUL.md:Identity,RITUALS.md:Relationship Rituals,../bad.md:Bad",
+    )
+
+    user_dir = tmp_path / "myspace-972"
+    user_dir.mkdir()
+    (user_dir / "SOUL.md").write_text("Identity for {{gbrain_source_id}}.", encoding="utf-8")
+    (user_dir / "MEMORY.md").write_text("Should not load.", encoding="utf-8")
+    (user_dir / "RITUALS.md").write_text("Daily callback ritual.", encoding="utf-8")
+
+    runtime = build_user_mcp_servers("myspace-972")
+
+    assert "## Identity (myspace-972)" in runtime.prompt_context
+    assert "Identity for myspace-972." in runtime.prompt_context
+    assert "## Relationship Rituals (myspace-972)" in runtime.prompt_context
+    assert "Daily callback ritual." in runtime.prompt_context
+    assert "Should not load." not in runtime.prompt_context
+    assert "Bad" not in runtime.prompt_context
