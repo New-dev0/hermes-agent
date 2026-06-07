@@ -177,6 +177,104 @@ class TestApiServerAdapterToolset:
             assert "Gateway User Context" in call_kwargs.kwargs.get("ephemeral_system_prompt")
 
     @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
+    def test_create_agent_preloads_myhome_skill_for_scoped_myspace(self, tmp_path):
+        """MySpace API requests force-load gateway-managed MyHome skills."""
+        from gateway.platforms.api_server import APIServerAdapter
+        from gateway.config import PlatformConfig
+
+        adapter = APIServerAdapter(PlatformConfig())
+        dynamic = SimpleNamespace(
+            source_id="myspace-972",
+            server_name=None,
+            toolsets=[],
+            mcp_servers={},
+            prompt_context="# Gateway User Context\n\nKnown user context.",
+        )
+
+        with patch("gateway.run._resolve_runtime_agent_kwargs") as mock_kwargs, \
+             patch("gateway.run._resolve_gateway_model") as mock_model, \
+             patch("gateway.run._load_gateway_config") as mock_config, \
+             patch("gateway.run.GatewayRunner._load_reasoning_config", return_value=None), \
+             patch("gateway.run.GatewayRunner._load_fallback_model", return_value=None), \
+             patch("gateway.user_mcp_servers.build_user_mcp_servers", return_value=dynamic), \
+             patch("agent.skill_commands.build_preloaded_skills_prompt") as mock_preload, \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+
+            mock_kwargs.return_value = {"api_key": "test-key", "base_url": None,
+                                        "provider": None, "api_mode": None,
+                                        "command": None, "args": []}
+            mock_model.return_value = "test/model"
+            mock_config.return_value = {"platform_toolsets": {"api_server": []}}
+            mock_preload.return_value = (
+                "# Preloaded myhome-companion skill",
+                ["myhome-companion"],
+                [],
+            )
+            mock_agent_cls.return_value = MagicMock()
+
+            adapter._create_agent(
+                ephemeral_system_prompt="Client system prompt.",
+                session_id="api-session",
+                gateway_session_key="myspace-972",
+                scoped_profile_home=tmp_path / "profiles" / "myspace-972",
+            )
+
+            mock_preload.assert_called_once_with(
+                ["myhome-companion"],
+                task_id="api-session",
+            )
+            prompt = mock_agent_cls.call_args.kwargs["ephemeral_system_prompt"]
+            assert "Client system prompt." in prompt
+            assert "# Preloaded myhome-companion skill" in prompt
+            assert "SwitchX MyHome Gateway Runtime Contract" in prompt
+            assert "Do not invent private memories" in prompt
+            assert "Gateway User Context" in prompt
+            assert prompt.index("Client system prompt.") < prompt.index("# Preloaded")
+            assert prompt.index("# Preloaded") < prompt.index("Gateway User Context")
+
+    @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
+    def test_create_agent_does_not_preload_myhome_for_unscoped_key(self):
+        """Arbitrary API session keys do not get MyHome preloaded."""
+        from gateway.platforms.api_server import APIServerAdapter
+        from gateway.config import PlatformConfig
+
+        adapter = APIServerAdapter(PlatformConfig())
+        dynamic = SimpleNamespace(
+            source_id=None,
+            server_name=None,
+            toolsets=[],
+            mcp_servers={},
+            prompt_context="",
+        )
+
+        with patch("gateway.run._resolve_runtime_agent_kwargs") as mock_kwargs, \
+             patch("gateway.run._resolve_gateway_model") as mock_model, \
+             patch("gateway.run._load_gateway_config") as mock_config, \
+             patch("gateway.run.GatewayRunner._load_reasoning_config", return_value=None), \
+             patch("gateway.run.GatewayRunner._load_fallback_model", return_value=None), \
+             patch("gateway.user_mcp_servers.build_user_mcp_servers", return_value=dynamic), \
+             patch("agent.skill_commands.build_preloaded_skills_prompt") as mock_preload, \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+
+            mock_kwargs.return_value = {"api_key": "test-key", "base_url": None,
+                                        "provider": None, "api_mode": None,
+                                        "command": None, "args": []}
+            mock_model.return_value = "test/model"
+            mock_config.return_value = {"platform_toolsets": {"api_server": []}}
+            mock_agent_cls.return_value = MagicMock()
+
+            adapter._create_agent(
+                ephemeral_system_prompt="Client system prompt.",
+                gateway_session_key="agent:main:webui:dm:user-972",
+            )
+
+            mock_preload.assert_not_called()
+            assert (
+                mock_agent_cls.call_args.kwargs["ephemeral_system_prompt"]
+                == "Client system prompt."
+            )
+
+    @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
     def test_scoped_create_agent_restores_memory_toolset_and_profile_db(self, tmp_path, monkeypatch):
         """Scoped myspace requests get built-in memory back, backed by profile state."""
         from gateway.platforms.api_server import APIServerAdapter

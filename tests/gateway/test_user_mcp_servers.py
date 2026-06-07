@@ -3,6 +3,7 @@ import sys
 from gateway.user_mcp_servers import (
     build_user_mcp_servers,
     derive_gbrain_source_id,
+    get_user_preload_skills,
     resolve_user_profile_home,
 )
 
@@ -29,6 +30,29 @@ def test_resolve_user_profile_home_uses_safe_myspace_scope(tmp_path, monkeypatch
     assert resolve_user_profile_home("myspace-972") == tmp_path / "myspace-972"
     assert resolve_user_profile_home("../../myspace-972") is None
     assert resolve_user_profile_home("user-972") is None
+
+
+def test_user_preload_skills_default_to_myhome_for_myspace(monkeypatch):
+    monkeypatch.delenv("HERMES_GATEWAY_USER_PRELOAD_SKILLS", raising=False)
+    monkeypatch.delenv("HERMES_GATEWAY_USER_PRELOAD_SKILLS_ENABLED", raising=False)
+
+    assert get_user_preload_skills("myspace-972") == ("myhome-companion",)
+    assert get_user_preload_skills("agent:main:webui:dm:user-972") == ()
+
+
+def test_user_preload_skills_can_be_configured_and_disabled(monkeypatch):
+    monkeypatch.setenv(
+        "HERMES_GATEWAY_USER_PRELOAD_SKILLS",
+        "myhome-companion, signal-detector myhome-companion",
+    )
+
+    assert get_user_preload_skills("myspace-972") == (
+        "myhome-companion",
+        "signal-detector",
+    )
+
+    monkeypatch.setenv("HERMES_GATEWAY_USER_PRELOAD_SKILLS_ENABLED", "false")
+    assert get_user_preload_skills("myspace-972") == ()
 
 
 def test_build_user_mcp_servers_scopes_gbrain_env(monkeypatch):

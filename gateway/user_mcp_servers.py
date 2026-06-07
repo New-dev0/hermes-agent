@@ -35,6 +35,7 @@ DEFAULT_CONTEXT_FILES = (
     ("SOUL.md", "Gateway SOUL.md"),
     ("MEMORY.md", "Gateway MEMORY.md"),
 )
+DEFAULT_PRELOAD_SKILLS = ("myhome-companion",)
 
 _SOURCE_RE = re.compile(r"^myspace-[A-Za-z0-9][A-Za-z0-9_-]{0,95}$")
 _FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
@@ -257,6 +258,27 @@ def build_user_prompt_context(
         "session. It is not supplied by the client request body.\n\n"
         + "\n\n".join(sections)
     )
+
+
+def get_user_preload_skills(gateway_session_key: Optional[str]) -> Tuple[str, ...]:
+    """Return gateway-managed skills to force-load for scoped MySpace requests."""
+
+    if not derive_gbrain_source_id(gateway_session_key):
+        return ()
+    if not _enabled("HERMES_GATEWAY_USER_PRELOAD_SKILLS_ENABLED", True):
+        return ()
+
+    configured = os.getenv("HERMES_GATEWAY_USER_PRELOAD_SKILLS")
+    raw_skills = configured if configured is not None else ",".join(DEFAULT_PRELOAD_SKILLS)
+    skills: List[str] = []
+    seen: set[str] = set()
+    for item in re.split(r"[,\s]+", raw_skills):
+        skill = item.strip()
+        if not skill or skill in seen:
+            continue
+        seen.add(skill)
+        skills.append(skill)
+    return tuple(skills)
 
 
 def build_user_mcp_servers(gateway_session_key: Optional[str]) -> UserMcpRuntime:

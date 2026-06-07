@@ -71,6 +71,14 @@ MAX_REQUEST_BYTES = 10_000_000  # 10 MB — accommodates long agent conversation
 CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0
 MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
+MYHOME_GATEWAY_RUNTIME_CONTRACT = """# SwitchX MyHome Gateway Runtime Contract
+
+The preloaded MyHome skill is active for this scoped gateway request.
+- Treat the authenticated `myspace-*` session key as a memory scope, not as memory content.
+- Do not invent private memories, past events, rituals, absences, conflicts, preferences, or production incidents.
+- Specific facts may come only from the current user message, gateway-provided context, retrieved GBrain/tool context, logs, or explicit prior conversation history.
+- If no specific memory is provided, use present-tense emotional texture without pretending to remember.
+- For technical requests, lead with verifiable facts and the next engineering action."""
 
 
 def _coerce_port(value: Any, default: int = DEFAULT_PORT) -> int:
@@ -1085,6 +1093,7 @@ class APIServerAdapter(BasePlatformAdapter):
         # they never provide arbitrary MCP command definitions in the request
         # body.
         gateway_prompt_context = ""
+        gateway_preloaded_skills_prompt = ""
         if gateway_session_key:
             try:
                 from gateway.user_mcp_servers import build_user_mcp_servers
@@ -1116,10 +1125,44 @@ class APIServerAdapter(BasePlatformAdapter):
                     exc_info=True,
                 )
 
-        if gateway_prompt_context:
+            try:
+                from agent.skill_commands import build_preloaded_skills_prompt
+                from gateway.user_mcp_servers import (
+                    derive_gbrain_source_id,
+                    get_user_preload_skills,
+                )
+
+                preload_skills = get_user_preload_skills(gateway_session_key)
+                if preload_skills:
+                    preload_prompt, loaded_skills, missing_skills = (
+                        build_preloaded_skills_prompt(
+                            list(preload_skills),
+                            task_id=session_id or gateway_session_key,
+                        )
+                    )
+                    if preload_prompt:
+                        gateway_preloaded_skills_prompt = "\n\n".join(
+                            [preload_prompt, MYHOME_GATEWAY_RUNTIME_CONTRACT]
+                        )
+                    logger.info(
+                        "API Server user skills preload: source=%s loaded=%s missing=%s",
+                        derive_gbrain_source_id(gateway_session_key),
+                        ",".join(loaded_skills),
+                        ",".join(missing_skills),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "API Server user skills preload failed for session key: %s",
+                    exc,
+                    exc_info=True,
+                )
+
+        if gateway_prompt_context or gateway_preloaded_skills_prompt:
             prompt_parts = []
             if ephemeral_system_prompt:
                 prompt_parts.append(ephemeral_system_prompt.strip())
+            if gateway_preloaded_skills_prompt:
+                prompt_parts.append(gateway_preloaded_skills_prompt)
             prompt_parts.append(gateway_prompt_context)
             ephemeral_system_prompt = "\n\n".join(p for p in prompt_parts if p)
 
