@@ -999,7 +999,56 @@ class APIServerAdapter(BasePlatformAdapter):
         model = _resolve_gateway_model()
 
         user_config = _load_gateway_config()
-        enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
+        enabled_toolsets = sorted(
+            _get_platform_tools(
+                user_config,
+                "api_server",
+                include_default_mcp_servers=False,
+            )
+        )
+
+        # SwitchX gateway extension: derive scoped GBrain MCP from trusted
+        # server-side session identity. Clients may choose a session key, but
+        # they never provide arbitrary MCP command definitions in the request
+        # body.
+        gateway_prompt_context = ""
+        if gateway_session_key:
+            try:
+                from gateway.user_mcp_servers import build_user_mcp_servers
+                from tools.mcp_tool import register_mcp_servers
+
+                user_mcp = build_user_mcp_servers(gateway_session_key)
+                if user_mcp.mcp_servers:
+                    register_mcp_servers(user_mcp.mcp_servers)
+                    enabled_toolsets = sorted(
+                        set(enabled_toolsets).union(user_mcp.toolsets)
+                    )
+                    logger.info(
+                        "API Server dynamic GBrain MCP enabled: source=%s "
+                        "server=%s toolsets=%s",
+                        user_mcp.source_id,
+                        user_mcp.server_name,
+                        ",".join(user_mcp.toolsets),
+                    )
+                if user_mcp.prompt_context:
+                    gateway_prompt_context = user_mcp.prompt_context
+                    logger.info(
+                        "API Server gateway user prompt context loaded: source=%s",
+                        user_mcp.source_id,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "API Server dynamic GBrain MCP setup failed for session key: %s",
+                    exc,
+                    exc_info=True,
+                )
+
+        if gateway_prompt_context:
+            prompt_parts = []
+            if ephemeral_system_prompt:
+                prompt_parts.append(ephemeral_system_prompt.strip())
+            prompt_parts.append(gateway_prompt_context)
+            ephemeral_system_prompt = "\n\n".join(p for p in prompt_parts if p)
 
         max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
 
