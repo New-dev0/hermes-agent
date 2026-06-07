@@ -974,14 +974,23 @@ class APIServerAdapter(BasePlatformAdapter):
             yield
             return
 
-        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+        from hermes_constants import (
+            get_hermes_config_home,
+            reset_hermes_config_home_override,
+            reset_hermes_home_override,
+            set_hermes_config_home_override,
+            set_hermes_home_override,
+        )
 
         profile_home.mkdir(parents=True, exist_ok=True)
-        token = set_hermes_home_override(profile_home)
+        config_home = get_hermes_config_home()
+        home_token = set_hermes_home_override(profile_home)
+        config_token = set_hermes_config_home_override(config_home)
         try:
             yield
         finally:
-            reset_hermes_home_override(token)
+            reset_hermes_config_home_override(config_token)
+            reset_hermes_home_override(home_token)
 
     def _ensure_session_db(self):
         """Lazily initialise and return the shared SessionDB instance.

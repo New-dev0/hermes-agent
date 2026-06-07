@@ -16,6 +16,9 @@ _UNSET = object()
 _HERMES_HOME_OVERRIDE: ContextVar[str | object] = ContextVar(
     "_HERMES_HOME_OVERRIDE", default=_UNSET
 )
+_HERMES_CONFIG_HOME_OVERRIDE: ContextVar[str | object] = ContextVar(
+    "_HERMES_CONFIG_HOME_OVERRIDE", default=_UNSET
+)
 
 
 def set_hermes_home_override(path: str | Path | None) -> Token:
@@ -33,9 +36,28 @@ def reset_hermes_home_override(token: Token) -> None:
     _HERMES_HOME_OVERRIDE.reset(token)
 
 
+def set_hermes_config_home_override(path: str | Path | None) -> Token:
+    """Set a context-local config/secrets home override."""
+    value: str | object = _UNSET if path is None else str(path)
+    return _HERMES_CONFIG_HOME_OVERRIDE.set(value)
+
+
+def reset_hermes_config_home_override(token: Token) -> None:
+    """Restore the previous context-local config/secrets home override."""
+    _HERMES_CONFIG_HOME_OVERRIDE.reset(token)
+
+
 def get_hermes_home_override() -> str | None:
     """Return the active context-local Hermes home override, if any."""
     override = _HERMES_HOME_OVERRIDE.get()
+    if override is _UNSET or not override:
+        return None
+    return str(override)
+
+
+def get_hermes_config_home_override() -> str | None:
+    """Return the active context-local config/secrets home override, if any."""
+    override = _HERMES_CONFIG_HOME_OVERRIDE.get()
     if override is _UNSET or not override:
         return None
     return str(override)
@@ -106,6 +128,19 @@ def get_hermes_home() -> Path:
                 pass
 
     return _get_platform_default_hermes_home()
+
+
+def get_hermes_config_home() -> Path:
+    """Return the Hermes home used for config.yaml and .env.
+
+    API gateway profile isolation can scope mutable state to a per-user Hermes
+    home while keeping deployment config and secrets on the root home. Outside
+    that scoped path this intentionally follows get_hermes_home().
+    """
+    override = get_hermes_config_home_override()
+    if override:
+        return Path(override)
+    return get_hermes_home()
 
 
 def get_default_hermes_root() -> Path:
@@ -400,7 +435,7 @@ def get_config_path() -> Path:
     Replaces the ``get_hermes_home() / "config.yaml"`` pattern repeated
     in 7+ files (skill_utils.py, hermes_logging.py, hermes_time.py, etc.).
     """
-    return get_hermes_home() / "config.yaml"
+    return get_hermes_config_home() / "config.yaml"
 
 
 def get_skills_dir() -> Path:
@@ -411,7 +446,7 @@ def get_skills_dir() -> Path:
 
 def get_env_path() -> Path:
     """Return the path to the ``.env`` file under HERMES_HOME."""
-    return get_hermes_home() / ".env"
+    return get_hermes_config_home() / ".env"
 
 
 # ─── Network Preferences ─────────────────────────────────────────────────────

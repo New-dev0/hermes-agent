@@ -6,7 +6,12 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+from hermes_constants import (
+    reset_hermes_config_home_override,
+    reset_hermes_home_override,
+    set_hermes_config_home_override,
+    set_hermes_home_override,
+)
 from tools.runtime_paths import runtime_path
 
 
@@ -111,6 +116,25 @@ def test_skills_sync_manifest_and_marker_follow_active_profile(monkeypatch, tmp_
     assert (profile_home / ".no-bundled-skills").exists()
     assert not (root_home / "skills" / ".bundled_manifest").exists()
     assert not (root_home / ".no-bundled-skills").exists()
+
+
+def test_config_path_can_remain_root_while_data_home_is_profile(monkeypatch, tmp_path):
+    root_home = tmp_path / "root"
+    profile_home = tmp_path / "profiles" / "myspace-42"
+    monkeypatch.setenv("HERMES_HOME", str(root_home))
+
+    from hermes_constants import get_hermes_home
+    from hermes_cli.config import get_config_path, get_env_path
+
+    home_token = set_hermes_home_override(profile_home)
+    config_token = set_hermes_config_home_override(root_home)
+    try:
+        assert get_hermes_home() == profile_home
+        assert get_config_path() == root_home / "config.yaml"
+        assert get_env_path() == root_home / ".env"
+    finally:
+        reset_hermes_config_home_override(config_token)
+        reset_hermes_home_override(home_token)
 
 
 def test_skill_creation_is_context_local_between_threads(monkeypatch, tmp_path):

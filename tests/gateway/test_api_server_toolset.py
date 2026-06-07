@@ -217,6 +217,48 @@ class TestApiServerAdapterToolset:
             assert call_kwargs["enabled_toolsets"] == ["memory"]
             assert call_kwargs["session_db"].db_path == profile_home / "state.db"
 
+    @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
+    def test_scoped_home_uses_profile_data_and_root_runtime_config(self, tmp_path, monkeypatch):
+        """API profile isolation must not hide deployment model/provider config."""
+        from gateway.platforms.api_server import APIServerAdapter
+        from gateway.config import PlatformConfig
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+        root_home = tmp_path / "root"
+        profile_home = tmp_path / "profiles" / "myspace-972"
+        root_home.mkdir()
+        (root_home / "config.yaml").write_text(
+            "\n".join(
+                [
+                    "model:",
+                    "  default: gpt-4.1",
+                    "  provider: azure-foundry",
+                    "  base_url: https://example.openai.azure.com/openai/v1",
+                    "  api_mode: chat_completions",
+                    "  auth_mode: api_key",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(root_home))
+        monkeypatch.setenv("AZURE_FOUNDRY_API_KEY", "azure-key")
+        monkeypatch.setenv("GOOGLE_API_KEY", "google-key")
+
+        adapter = APIServerAdapter(PlatformConfig())
+
+        with adapter._scoped_hermes_home(profile_home):
+            from hermes_constants import get_hermes_home
+            from hermes_cli.config import get_config_path
+
+            runtime = resolve_runtime_provider()
+
+            assert get_hermes_home() == profile_home
+            assert get_config_path() == root_home / "config.yaml"
+            assert runtime["provider"] == "azure-foundry"
+            assert runtime["base_url"] == "https://example.openai.azure.com/openai/v1"
+            assert runtime["api_key"] == "azure-key"
+
     @pytest.mark.asyncio
     @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
     async def test_run_agent_binds_scoped_hermes_home_in_executor(self, tmp_path, monkeypatch):
