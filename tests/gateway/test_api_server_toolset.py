@@ -2,6 +2,8 @@
 from unittest.mock import patch, MagicMock
 from types import SimpleNamespace
 
+import pytest
+
 
 from toolsets import resolve_toolset, get_toolset, validate_toolset
 
@@ -173,3 +175,104 @@ class TestApiServerAdapterToolset:
             assert "mcp-gbrain" not in toolsets
             assert "mcp-gbrain_abcd1234" in toolsets
             assert "Gateway User Context" in call_kwargs.kwargs.get("ephemeral_system_prompt")
+
+    @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
+    def test_scoped_create_agent_restores_memory_toolset_and_profile_db(self, tmp_path, monkeypatch):
+        """Scoped myspace requests get built-in memory back, backed by profile state."""
+        from gateway.platforms.api_server import APIServerAdapter
+        from gateway.config import PlatformConfig
+
+        monkeypatch.setenv("HERMES_GATEWAY_USER_PROFILE_ROOT", str(tmp_path / "profiles"))
+        monkeypatch.setenv("HERMES_GBRAIN_MCP_ENABLED", "false")
+        adapter = APIServerAdapter(PlatformConfig())
+        profile_home = adapter._profile_home_for_session_key("myspace-972")
+
+        class FakeSessionDB:
+            def __init__(self, db_path=None, read_only=False):
+                self.db_path = db_path
+                self.read_only = read_only
+
+        with patch("gateway.run._resolve_runtime_agent_kwargs") as mock_kwargs, \
+             patch("gateway.run._resolve_gateway_model") as mock_model, \
+             patch("gateway.run._load_gateway_config") as mock_config, \
+             patch("gateway.run.GatewayRunner._load_reasoning_config", return_value=None), \
+             patch("gateway.run.GatewayRunner._load_fallback_model", return_value=None), \
+             patch("hermes_state.SessionDB", FakeSessionDB), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+
+            mock_kwargs.return_value = {"api_key": "test-key", "base_url": None,
+                                        "provider": None, "api_mode": None,
+                                        "command": None, "args": []}
+            mock_model.return_value = "test/model"
+            mock_config.return_value = {"platform_toolsets": {"api_server": []}}
+            mock_agent_cls.return_value = MagicMock()
+
+            with adapter._scoped_hermes_home(profile_home):
+                adapter._create_agent(
+                    gateway_session_key="myspace-972",
+                    scoped_profile_home=profile_home,
+                )
+
+            call_kwargs = mock_agent_cls.call_args.kwargs
+            assert call_kwargs["enabled_toolsets"] == ["memory"]
+            assert call_kwargs["session_db"].db_path == profile_home / "state.db"
+
+    @pytest.mark.asyncio
+    @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
+    async def test_run_agent_binds_scoped_hermes_home_in_executor(self, tmp_path, monkeypatch):
+        """The request-scoped profile override is active during run_conversation."""
+        from gateway.platforms.api_server import APIServerAdapter
+        from gateway.config import PlatformConfig
+
+        monkeypatch.setenv("HERMES_GATEWAY_USER_PROFILE_ROOT", str(tmp_path / "profiles"))
+        monkeypatch.setenv("HERMES_GBRAIN_MCP_ENABLED", "false")
+        adapter = APIServerAdapter(PlatformConfig())
+        seen = {}
+
+        class FakeSessionDB:
+            def __init__(self, db_path=None, read_only=False):
+                self.db_path = db_path
+                self.read_only = read_only
+
+        class FakeAgent:
+            session_prompt_tokens = 0
+            session_completion_tokens = 0
+            session_total_tokens = 0
+
+            def __init__(self, *args, **kwargs):
+                self.session_id = kwargs.get("session_id") or "sid"
+                seen["toolsets"] = kwargs.get("enabled_toolsets")
+                seen["session_db"] = kwargs.get("session_db")
+
+            def run_conversation(self, *args, **kwargs):
+                from hermes_constants import get_hermes_home
+
+                seen["hermes_home"] = get_hermes_home()
+                return {"final_response": "ok"}
+
+        with patch("gateway.run._resolve_runtime_agent_kwargs") as mock_kwargs, \
+             patch("gateway.run._resolve_gateway_model") as mock_model, \
+             patch("gateway.run._load_gateway_config") as mock_config, \
+             patch("gateway.run.GatewayRunner._load_reasoning_config", return_value=None), \
+             patch("gateway.run.GatewayRunner._load_fallback_model", return_value=None), \
+             patch("hermes_state.SessionDB", FakeSessionDB), \
+             patch("run_agent.AIAgent", FakeAgent):
+
+            mock_kwargs.return_value = {"api_key": "test-key", "base_url": None,
+                                        "provider": None, "api_mode": None,
+                                        "command": None, "args": []}
+            mock_model.return_value = "test/model"
+            mock_config.return_value = {"platform_toolsets": {"api_server": []}}
+
+            result, _usage = await adapter._run_agent(
+                "hi",
+                [],
+                session_id="api-session",
+                gateway_session_key="myspace-972",
+            )
+
+        expected_home = tmp_path / "profiles" / "myspace-972"
+        assert result["final_response"] == "ok"
+        assert seen["hermes_home"] == expected_home
+        assert seen["toolsets"] == ["memory"]
+        assert seen["session_db"].db_path == expected_home / "state.db"

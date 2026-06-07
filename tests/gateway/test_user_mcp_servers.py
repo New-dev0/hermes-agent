@@ -3,6 +3,7 @@ import sys
 from gateway.user_mcp_servers import (
     build_user_mcp_servers,
     derive_gbrain_source_id,
+    resolve_user_profile_home,
 )
 
 
@@ -20,6 +21,14 @@ def test_derive_gbrain_source_id_accepts_wrapped_myspace_key():
 def test_derive_gbrain_source_id_rejects_arbitrary_keys():
     assert derive_gbrain_source_id("agent:main:webui:dm:user-42") is None
     assert derive_gbrain_source_id("../../myspace-42") is None
+
+
+def test_resolve_user_profile_home_uses_safe_myspace_scope(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_GATEWAY_USER_PROFILE_ROOT", str(tmp_path))
+
+    assert resolve_user_profile_home("myspace-972") == tmp_path / "myspace-972"
+    assert resolve_user_profile_home("../../myspace-972") is None
+    assert resolve_user_profile_home("user-972") is None
 
 
 def test_build_user_mcp_servers_scopes_gbrain_env(monkeypatch):

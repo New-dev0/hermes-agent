@@ -40,8 +40,10 @@ import os
 import socket as _socket
 import re
 import sqlite3
+import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -730,6 +732,8 @@ class APIServerAdapter(BasePlatformAdapter):
         # in-flight run by run_id.
         self._run_approval_sessions: Dict[str, str] = {}
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
+        self._scoped_session_dbs: Dict[str, Any] = {}
+        self._session_db_lock = threading.Lock()
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -947,6 +951,38 @@ class APIServerAdapter(BasePlatformAdapter):
     # Session DB helper
     # ------------------------------------------------------------------
 
+    def _profile_home_for_session_key(self, gateway_session_key: Optional[str]) -> Optional[Path]:
+        """Resolve the per-user Hermes profile home for scoped API requests."""
+        if not gateway_session_key:
+            return None
+        try:
+            from gateway.user_mcp_servers import resolve_user_profile_home
+
+            return resolve_user_profile_home(gateway_session_key)
+        except Exception as exc:
+            logger.warning(
+                "API Server scoped profile resolution failed for session key: %s",
+                exc,
+                exc_info=True,
+            )
+            return None
+
+    @contextmanager
+    def _scoped_hermes_home(self, profile_home: Optional[Path]):
+        """Temporarily bind HERMES_HOME for one executor worker/request."""
+        if profile_home is None:
+            yield
+            return
+
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+        profile_home.mkdir(parents=True, exist_ok=True)
+        token = set_hermes_home_override(profile_home)
+        try:
+            yield
+        finally:
+            reset_hermes_home_override(token)
+
     def _ensure_session_db(self):
         """Lazily initialise and return the shared SessionDB instance.
 
@@ -954,12 +990,39 @@ class APIServerAdapter(BasePlatformAdapter):
         shows API-server conversations alongside CLI and gateway ones.
         """
         if self._session_db is None:
-            try:
-                from hermes_state import SessionDB
-                self._session_db = SessionDB()
-            except Exception as e:
-                logger.debug("SessionDB unavailable for API server: %s", e)
+            with self._session_db_lock:
+                if self._session_db is None:
+                    try:
+                        from hermes_state import SessionDB
+                        self._session_db = SessionDB()
+                    except Exception as e:
+                        logger.debug("SessionDB unavailable for API server: %s", e)
         return self._session_db
+
+    def _session_db_for_profile_home(self, profile_home: Optional[Path]):
+        """Return the root or profile-scoped SessionDB for this API request."""
+        if profile_home is None:
+            return self._ensure_session_db()
+
+        try:
+            from hermes_state import SessionDB
+
+            db_path = profile_home / "state.db"
+            key = str(db_path)
+            with self._session_db_lock:
+                db = self._scoped_session_dbs.get(key)
+                if db is None:
+                    profile_home.mkdir(parents=True, exist_ok=True)
+                    db = SessionDB(db_path=db_path)
+                    self._scoped_session_dbs[key] = db
+                return db
+        except Exception as e:
+            logger.debug(
+                "Scoped SessionDB unavailable for API server profile %s: %s",
+                profile_home,
+                e,
+            )
+            return None
 
     # ------------------------------------------------------------------
     # Agent creation helper
@@ -974,6 +1037,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_start_callback=None,
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
+        scoped_profile_home: Optional[Path] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -1050,6 +1114,14 @@ class APIServerAdapter(BasePlatformAdapter):
             prompt_parts.append(gateway_prompt_context)
             ephemeral_system_prompt = "\n\n".join(p for p in prompt_parts if p)
 
+        if scoped_profile_home is not None:
+            enabled_toolsets = sorted(set(enabled_toolsets).union({"memory"}))
+            logger.info(
+                "API Server scoped Hermes profile enabled: home=%s toolsets=%s",
+                scoped_profile_home,
+                ",".join(enabled_toolsets),
+            )
+
         max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
 
         # Load fallback provider chain so the API server platform has the
@@ -1070,7 +1142,7 @@ class APIServerAdapter(BasePlatformAdapter):
             tool_progress_callback=tool_progress_callback,
             tool_start_callback=tool_start_callback,
             tool_complete_callback=tool_complete_callback,
-            session_db=self._ensure_session_db(),
+            session_db=self._session_db_for_profile_home(scoped_profile_home),
             fallback_model=fallback_model,
             reasoning_config=reasoning_config,
             gateway_session_key=gateway_session_key,
@@ -3509,37 +3581,40 @@ class APIServerAdapter(BasePlatformAdapter):
         another thread to stop in-progress LLM calls.
         """
         loop = asyncio.get_running_loop()
+        scoped_profile_home = self._profile_home_for_session_key(gateway_session_key)
 
         def _run():
-            agent = self._create_agent(
-                ephemeral_system_prompt=ephemeral_system_prompt,
-                session_id=session_id,
-                stream_delta_callback=stream_delta_callback,
-                tool_progress_callback=tool_progress_callback,
-                tool_start_callback=tool_start_callback,
-                tool_complete_callback=tool_complete_callback,
-                gateway_session_key=gateway_session_key,
-            )
-            if agent_ref is not None:
-                agent_ref[0] = agent
-            effective_task_id = session_id or str(uuid.uuid4())
-            result = agent.run_conversation(
-                user_message=user_message,
-                conversation_history=conversation_history,
-                task_id=effective_task_id,
-            )
-            usage = {
-                "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
-                "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
-                "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
-            }
-            # Include the effective session ID in the result so callers
-            # (e.g. X-Hermes-Session-Id header) can track compression-
-            # triggered session rotations. (#16938)
-            _eff_sid = getattr(agent, "session_id", session_id)
-            if isinstance(_eff_sid, str) and _eff_sid:
-                result["session_id"] = _eff_sid
-            return result, usage
+            with self._scoped_hermes_home(scoped_profile_home):
+                agent = self._create_agent(
+                    ephemeral_system_prompt=ephemeral_system_prompt,
+                    session_id=session_id,
+                    stream_delta_callback=stream_delta_callback,
+                    tool_progress_callback=tool_progress_callback,
+                    tool_start_callback=tool_start_callback,
+                    tool_complete_callback=tool_complete_callback,
+                    gateway_session_key=gateway_session_key,
+                    scoped_profile_home=scoped_profile_home,
+                )
+                if agent_ref is not None:
+                    agent_ref[0] = agent
+                effective_task_id = session_id or str(uuid.uuid4())
+                result = agent.run_conversation(
+                    user_message=user_message,
+                    conversation_history=conversation_history,
+                    task_id=effective_task_id,
+                )
+                usage = {
+                    "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
+                    "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
+                    "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
+                }
+                # Include the effective session ID in the result so callers
+                # (e.g. X-Hermes-Session-Id header) can track compression-
+                # triggered session rotations. (#16938)
+                _eff_sid = getattr(agent, "session_id", session_id)
+                if isinstance(_eff_sid, str) and _eff_sid:
+                    result["session_id"] = _eff_sid
+                return result, usage
 
         return await loop.run_in_executor(None, _run)
 
@@ -3724,19 +3799,11 @@ class APIServerAdapter(BasePlatformAdapter):
             session_id=session_id,
             model=body.get("model", self._model_name),
         )
+        scoped_profile_home = self._profile_home_for_session_key(gateway_session_key)
 
         async def _run_and_close():
             try:
                 self._set_run_status(run_id, "running")
-                agent = self._create_agent(
-                    ephemeral_system_prompt=ephemeral_system_prompt,
-                    session_id=session_id,
-                    stream_delta_callback=_text_cb,
-                    tool_progress_callback=event_cb,
-                    gateway_session_key=gateway_session_key,
-                )
-                self._active_run_agents[run_id] = agent
-
                 def _approval_notify(approval_data: Dict[str, Any]) -> None:
                     event = dict(approval_data or {})
                     event.update({
@@ -3767,21 +3834,33 @@ class APIServerAdapter(BasePlatformAdapter):
                     effective_task_id = session_id or run_id
                     approval_token = None
                     session_tokens = []
+                    agent = None
                     try:
-                        # Bind approval/session identity for this API run via
-                        # contextvars so concurrent runs do not share process
-                        # environment state.
-                        approval_token = set_current_session_key(approval_session_key)
-                        session_tokens = set_session_vars(
-                            platform="api_server",
-                            session_key=approval_session_key,
-                        )
-                        register_gateway_notify(approval_session_key, _approval_notify)
-                        r = agent.run_conversation(
-                            user_message=user_message,
-                            conversation_history=conversation_history,
-                            task_id=effective_task_id,
-                        )
+                        with self._scoped_hermes_home(scoped_profile_home):
+                            agent = self._create_agent(
+                                ephemeral_system_prompt=ephemeral_system_prompt,
+                                session_id=session_id,
+                                stream_delta_callback=_text_cb,
+                                tool_progress_callback=event_cb,
+                                gateway_session_key=gateway_session_key,
+                                scoped_profile_home=scoped_profile_home,
+                            )
+                            self._active_run_agents[run_id] = agent
+
+                            # Bind approval/session identity for this API run via
+                            # contextvars so concurrent runs do not share process
+                            # environment state.
+                            approval_token = set_current_session_key(approval_session_key)
+                            session_tokens = set_session_vars(
+                                platform="api_server",
+                                session_key=approval_session_key,
+                            )
+                            register_gateway_notify(approval_session_key, _approval_notify)
+                            r = agent.run_conversation(
+                                user_message=user_message,
+                                conversation_history=conversation_history,
+                                task_id=effective_task_id,
+                            )
                     finally:
                         try:
                             unregister_gateway_notify(approval_session_key)

@@ -1422,6 +1422,9 @@ class AIAgent:
             review_memory=review_memory,
             review_skills=review_skills,
         )
+        from tools.thread_context import propagate_context_to_thread
+
+        target = propagate_context_to_thread(target)
         t = threading.Thread(target=target, daemon=True, name="bg-review")
         t.start()
 

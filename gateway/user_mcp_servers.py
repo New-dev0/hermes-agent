@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_default_hermes_root
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +114,34 @@ def _prompt_root() -> Path:
     configured = os.getenv("HERMES_GATEWAY_USER_CONTEXT_ROOT", "").strip()
     if configured:
         return Path(os.path.expanduser(configured))
-    return get_hermes_home() / "gateway" / "myspaces"
+    return get_default_hermes_root() / "gateway" / "myspaces"
+
+
+def resolve_user_profile_home(gateway_session_key: Optional[str]) -> Optional[Path]:
+    """Return the scoped Hermes profile home for a trusted gateway session key."""
+
+    source_id = derive_gbrain_source_id(gateway_session_key)
+    if not source_id:
+        return None
+
+    configured = os.getenv("HERMES_GATEWAY_USER_PROFILE_ROOT", "").strip()
+    root = (
+        Path(os.path.expanduser(configured))
+        if configured
+        else get_default_hermes_root() / "profiles"
+    )
+    try:
+        root_resolved = root.resolve()
+        profile_home = (root_resolved / source_id).resolve()
+        profile_home.relative_to(root_resolved)
+        return profile_home
+    except Exception:
+        logger.warning(
+            "Gateway user profile path rejected: root=%s source=%s",
+            root,
+            source_id,
+        )
+        return None
 
 
 def _context_files() -> Tuple[Tuple[str, str], ...]:
