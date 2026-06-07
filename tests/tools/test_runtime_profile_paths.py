@@ -158,6 +158,26 @@ def test_scoped_profile_uses_root_soul_without_seeding_profile_soul(monkeypatch,
         reset_hermes_home_override(home_token)
 
 
+def test_scoped_profile_soul_takes_precedence_when_present(monkeypatch, tmp_path):
+    root_home = tmp_path / "root"
+    profile_home = tmp_path / "profiles" / "myspace-42"
+    monkeypatch.setenv("HERMES_HOME", str(root_home))
+    root_home.mkdir()
+    profile_home.mkdir(parents=True)
+    (root_home / "SOUL.md").write_text("Root identity.", encoding="utf-8")
+    (profile_home / "SOUL.md").write_text("Profile identity.", encoding="utf-8")
+
+    from agent.prompt_builder import load_soul_md
+
+    home_token = set_hermes_home_override(profile_home)
+    config_token = set_hermes_config_home_override(root_home)
+    try:
+        assert load_soul_md() == "Profile identity."
+    finally:
+        reset_hermes_config_home_override(config_token)
+        reset_hermes_home_override(home_token)
+
+
 def test_regular_home_still_seeds_default_soul(monkeypatch, tmp_path):
     hermes_home = tmp_path / "root"
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))

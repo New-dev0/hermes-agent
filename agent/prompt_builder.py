@@ -1410,35 +1410,39 @@ def load_soul_md() -> Optional[str]:
     ``skip_soul=True`` so SOUL.md isn't injected twice.
 
     API gateway requests can bind ``HERMES_HOME`` to a per-user profile while
-    keeping deployment config on the root home. In that mode the shared root
-    ``SOUL.md`` is the persona source of truth; profile homes carry mutable
-    state only.
+    keeping deployment config on the root home. In that mode an explicit
+    profile ``SOUL.md`` is honored for backward compatibility; otherwise the
+    shared root ``SOUL.md`` is used as the default identity.
     """
     hermes_home = get_hermes_home()
     config_home = get_hermes_config_home()
-    use_root_soul = config_home != hermes_home
+    scoped_profile = config_home != hermes_home
 
     try:
         from hermes_cli.config import ensure_hermes_home
 
-        if not use_root_soul:
+        if not scoped_profile:
             ensure_hermes_home()
     except Exception as e:
         logger.debug("Could not ensure HERMES_HOME before loading SOUL.md: %s", e)
 
-    soul_path = (config_home if use_root_soul else hermes_home) / "SOUL.md"
-    if not soul_path.exists():
-        return None
-    try:
-        content = soul_path.read_text(encoding="utf-8").strip()
-        if not content:
-            return None
-        content = _scan_context_content(content, "SOUL.md")
-        content = _truncate_content(content, "SOUL.md")
-        return content
-    except Exception as e:
-        logger.debug("Could not read SOUL.md from %s: %s", soul_path, e)
-        return None
+    soul_paths = [hermes_home / "SOUL.md"]
+    if scoped_profile:
+        soul_paths.append(config_home / "SOUL.md")
+
+    for soul_path in soul_paths:
+        if not soul_path.exists():
+            continue
+        try:
+            content = soul_path.read_text(encoding="utf-8").strip()
+            if not content:
+                continue
+            content = _scan_context_content(content, "SOUL.md")
+            content = _truncate_content(content, "SOUL.md")
+            return content
+        except Exception as e:
+            logger.debug("Could not read SOUL.md from %s: %s", soul_path, e)
+    return None
 
 
 def _load_hermes_md(cwd_path: Path) -> str:
