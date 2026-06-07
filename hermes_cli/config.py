@@ -770,7 +770,11 @@ def ensure_hermes_home():
             d = home / subdir
             d.mkdir(parents=True, exist_ok=True)
             _secure_dir(d)
-        _ensure_default_soul_md(home)
+        # API gateway profile scoping binds HERMES_HOME to a per-user profile
+        # while keeping config/secrets/persona on the deployment root. In that
+        # mode profile homes should not receive their own seeded SOUL.md.
+        if get_hermes_config_home() == home:
+            _ensure_default_soul_md(home)
 
 
 def _ensure_hermes_home_managed(home: Path):
@@ -791,8 +795,10 @@ def _ensure_hermes_home_managed(home: Path):
     # In managed mode the activation script may not know about this subdir,
     # so we mkdir it ourselves (it's inside an already-secured logs/ dir).
     (home / "logs" / "curator").mkdir(parents=True, exist_ok=True)
-    # Inside umask(0o007) scope — SOUL.md will be created as 0660
-    _ensure_default_soul_md(home)
+    # Inside umask(0o007) scope — SOUL.md will be created as 0660.
+    # Skip in scoped API profile homes; root SOUL.md remains authoritative.
+    if get_hermes_config_home() == home:
+        _ensure_default_soul_md(home)
 
 
 # =============================================================================

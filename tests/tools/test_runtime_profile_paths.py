@@ -137,6 +137,38 @@ def test_config_path_can_remain_root_while_data_home_is_profile(monkeypatch, tmp
         reset_hermes_home_override(home_token)
 
 
+def test_scoped_profile_uses_root_soul_without_seeding_profile_soul(monkeypatch, tmp_path):
+    root_home = tmp_path / "root"
+    profile_home = tmp_path / "profiles" / "myspace-42"
+    monkeypatch.setenv("HERMES_HOME", str(root_home))
+    root_home.mkdir()
+    (root_home / "SOUL.md").write_text("Root identity only.", encoding="utf-8")
+
+    from agent.prompt_builder import load_soul_md
+    from hermes_cli.config import ensure_hermes_home
+
+    home_token = set_hermes_home_override(profile_home)
+    config_token = set_hermes_config_home_override(root_home)
+    try:
+        ensure_hermes_home()
+        assert load_soul_md() == "Root identity only."
+        assert not (profile_home / "SOUL.md").exists()
+    finally:
+        reset_hermes_config_home_override(config_token)
+        reset_hermes_home_override(home_token)
+
+
+def test_regular_home_still_seeds_default_soul(monkeypatch, tmp_path):
+    hermes_home = tmp_path / "root"
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    from hermes_cli.config import ensure_hermes_home
+
+    ensure_hermes_home()
+
+    assert (hermes_home / "SOUL.md").exists()
+
+
 def test_skill_creation_is_context_local_between_threads(monkeypatch, tmp_path):
     root_home = tmp_path / "root"
     profile_a = tmp_path / "profiles" / "myspace-a"

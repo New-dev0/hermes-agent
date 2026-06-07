@@ -11,7 +11,7 @@ import threading
 from collections import OrderedDict
 from pathlib import Path
 
-from hermes_constants import get_hermes_home, get_skills_dir, is_wsl
+from hermes_constants import get_hermes_config_home, get_hermes_home, get_skills_dir, is_wsl
 from typing import Optional
 
 from agent.runtime_cwd import resolve_agent_cwd
@@ -1403,19 +1403,30 @@ def _truncate_content(content: str, filename: str, max_chars: int = CONTEXT_FILE
 
 
 def load_soul_md() -> Optional[str]:
-    """Load SOUL.md from HERMES_HOME and return its content, or None.
+    """Load SOUL.md and return its content, or None.
 
     Used as the agent identity (slot #1 in the system prompt).  When this
     returns content, ``build_context_files_prompt`` should be called with
     ``skip_soul=True`` so SOUL.md isn't injected twice.
+
+    API gateway requests can bind ``HERMES_HOME`` to a per-user profile while
+    keeping deployment config on the root home. In that mode the shared root
+    ``SOUL.md`` is the persona source of truth; profile homes carry mutable
+    state only.
     """
+    hermes_home = get_hermes_home()
+    config_home = get_hermes_config_home()
+    use_root_soul = config_home != hermes_home
+
     try:
         from hermes_cli.config import ensure_hermes_home
-        ensure_hermes_home()
+
+        if not use_root_soul:
+            ensure_hermes_home()
     except Exception as e:
         logger.debug("Could not ensure HERMES_HOME before loading SOUL.md: %s", e)
 
-    soul_path = get_hermes_home() / "SOUL.md"
+    soul_path = (config_home if use_root_soul else hermes_home) / "SOUL.md"
     if not soul_path.exists():
         return None
     try:
