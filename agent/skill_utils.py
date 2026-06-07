@@ -324,13 +324,12 @@ def _normalize_string_set(values) -> Set[str]:
 
 # ── External skills directories ──────────────────────────────────────────
 
-# (config_path_str, mtime_ns) -> resolved external dirs list.  Keyed by
-# mtime_ns so a config.yaml edit mid-run is picked up automatically;
-# otherwise every call would re-read + re-YAML-parse the 15KB config,
-# which becomes the dominant cost of ``hermes`` startup when ~120 skills
-# each trigger a category lookup during banner construction (10+ seconds
-# of pure waste).
-_EXTERNAL_DIRS_CACHE: Dict[Tuple[str, int], List[Path]] = {}
+# (config_path_str, mtime_ns, local_skills_dir) -> resolved external dirs list.
+# ``local_skills_dir`` is part of the key because API gateway requests can keep
+# config.yaml rooted at the deployment home while scoping HERMES_HOME to a
+# per-user profile. A root-level cache entry would otherwise hide the shared
+# root skills dir from profile-scoped requests.
+_EXTERNAL_DIRS_CACHE: Dict[Tuple[str, int, str], List[Path]] = {}
 
 
 def _external_dirs_cache_clear() -> None:
@@ -354,11 +353,20 @@ def get_external_skills_dirs() -> List[Path]:
     if not config_path.exists():
         return []
 
-    # Cache key: (absolute path, mtime_ns).  stat() is ~2us vs ~85ms for
-    # the full YAML parse, so the fast path is nearly free.
+    from hermes_constants import get_hermes_home
+
+    hermes_home = get_hermes_home()
+    local_skills = get_skills_dir().resolve()
+
+    # Cache key: (absolute path, mtime_ns, local skills dir).  stat() is ~2us
+    # vs ~85ms for the full YAML parse, so the fast path is nearly free.
     try:
         stat = config_path.stat()
-        cache_key: Tuple[str, int] = (str(config_path), stat.st_mtime_ns)
+        cache_key: Tuple[str, int, str] = (
+            str(config_path),
+            stat.st_mtime_ns,
+            str(local_skills),
+        )
     except OSError:
         cache_key = None  # type: ignore[assignment]
 
@@ -390,10 +398,6 @@ def get_external_skills_dirs() -> List[Path]:
     if not isinstance(raw_dirs, list):
         return []
 
-    from hermes_constants import get_hermes_home
-
-    hermes_home = get_hermes_home()
-    local_skills = get_skills_dir().resolve()
     seen: Set[Path] = set()
     result = []
 
