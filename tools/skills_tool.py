@@ -69,7 +69,7 @@ Usage:
 import json
 import logging
 
-from hermes_constants import get_hermes_home, display_hermes_home
+from hermes_constants import get_hermes_home, get_skills_dir, display_hermes_home
 import os
 import re
 from enum import Enum
@@ -80,15 +80,15 @@ from tools.registry import registry, tool_error
 from hermes_cli.config import cfg_get
 from utils import env_var_enabled
 from agent.skill_utils import EXCLUDED_SKILL_DIRS as _EXCLUDED_SKILL_DIRS
+from tools.runtime_paths import RuntimePath
 
 logger = logging.getLogger(__name__)
 
 
-# All skills live in ~/.hermes/skills/ (seeded from bundled skills/ on install).
-# This is the single source of truth -- agent edits, hub installs, and bundled
-# skills all coexist here without polluting the git repo.
-HERMES_HOME = get_hermes_home()
-SKILLS_DIR = HERMES_HOME / "skills"
+# Public path constants stay path-like for old callers/tests, but resolve at
+# call time so API-scoped Hermes profiles do not share an import-time path.
+HERMES_HOME = RuntimePath(get_hermes_home, "HERMES_HOME")
+SKILLS_DIR = RuntimePath(get_skills_dir, "SKILLS_DIR")
 
 # Anthropic-recommended limits for progressive disclosure efficiency
 MAX_NAME_LENGTH = 64
@@ -1043,7 +1043,7 @@ def skill_view(
                     _record(None, found_md)
 
         if len(candidates) > 1:
-            paths = [str(smd) for _, smd in candidates]
+            paths = [smd.as_posix() for _, smd in candidates]
             logging.getLogger(__name__).warning(
                 "Skill name collision for '%s': %d candidates — %s",
                 name, len(candidates), "; ".join(paths),
@@ -1193,7 +1193,7 @@ def skill_view(
                 # Scan for all readable files
                 for f in skill_dir.rglob("*"):
                     if f.is_file() and f.name != "SKILL.md":
-                        rel = str(f.relative_to(skill_dir))
+                        rel = f.relative_to(skill_dir).as_posix()
                         if rel.startswith("references/"):
                             available_files["references"].append(rel)
                         elif rel.startswith("templates/"):
@@ -1266,7 +1266,7 @@ def skill_view(
             references_dir = skill_dir / "references"
             if references_dir.exists():
                 reference_files = [
-                    str(f.relative_to(skill_dir)) for f in references_dir.glob("*.md")
+                    f.relative_to(skill_dir).as_posix() for f in references_dir.glob("*.md")
                 ]
 
             templates_dir = skill_dir / "templates"
@@ -1282,7 +1282,7 @@ def skill_view(
                 ]:
                     template_files.extend(
                         [
-                            str(f.relative_to(skill_dir))
+                            f.relative_to(skill_dir).as_posix()
                             for f in templates_dir.rglob(ext)
                         ]
                     )
@@ -1292,13 +1292,13 @@ def skill_view(
             if assets_dir.exists():
                 for f in assets_dir.rglob("*"):
                     if f.is_file():
-                        asset_files.append(str(f.relative_to(skill_dir)))
+                        asset_files.append(f.relative_to(skill_dir).as_posix())
 
             scripts_dir = skill_dir / "scripts"
             if scripts_dir.exists():
                 for ext in ["*.py", "*.sh", "*.bash", "*.js", "*.ts", "*.rb"]:
                     script_files.extend(
-                        [str(f.relative_to(skill_dir)) for f in scripts_dir.glob(ext)]
+                        [f.relative_to(skill_dir).as_posix() for f in scripts_dir.glob(ext)]
                     )
 
         # Read tags/related_skills with backward compat:
@@ -1325,10 +1325,14 @@ def skill_view(
             linked_files["scripts"] = script_files
 
         try:
-            rel_path = str(skill_md.relative_to(SKILLS_DIR))
+            rel_path = skill_md.relative_to(SKILLS_DIR).as_posix()
         except ValueError:
             # External skill — use path relative to the skill's own parent dir
-            rel_path = str(skill_md.relative_to(skill_md.parent.parent)) if skill_md.parent.parent else skill_md.name
+            rel_path = (
+                skill_md.relative_to(skill_md.parent.parent).as_posix()
+                if skill_md.parent.parent
+                else skill_md.name
+            )
         skill_name = frontmatter.get(
             "name", skill_md.stem if not skill_dir else skill_dir.name
         )

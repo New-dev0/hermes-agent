@@ -48,6 +48,19 @@ TRUSTED_REPOS = {
     "NVIDIA/skills",
 }
 
+_TEXT_HASH_SUFFIXES = {
+    ".md",
+    ".txt",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".py",
+    ".js",
+    ".ts",
+    ".sh",
+}
+
 INSTALL_POLICY = {
     #                  safe      caution    dangerous
     "builtin":       ("allow",  "allow",   "allow"),
@@ -776,13 +789,18 @@ def content_hash(skill_path: Path) -> str:
     """
     h = hashlib.sha256()
     if skill_path.is_dir():
-        for f in sorted(skill_path.rglob("*")):
+        files = [f for f in skill_path.rglob("*") if f.is_file()]
+        files.sort(key=lambda f: f.relative_to(skill_path).as_posix())
+        for f in files:
             if f.is_file():
                 try:
                     rel = f.relative_to(skill_path).as_posix()
+                    data = f.read_bytes()
+                    if f.suffix.lower() in _TEXT_HASH_SUFFIXES:
+                        data = data.replace(b"\r\n", b"\n")
                     h.update(rel.encode("utf-8"))
                     h.update(b"\x00")
-                    h.update(f.read_bytes())
+                    h.update(data)
                 except OSError:
                     continue
     elif skill_path.is_file():
@@ -821,7 +839,7 @@ def _check_structure(skill_dir: Path, ignore=None) -> List[Finding]:
         if not f.is_file() and not f.is_symlink():
             continue
 
-        rel = str(f.relative_to(skill_dir))
+        rel = f.relative_to(skill_dir).as_posix()
         if ignore(rel):
             continue
         file_count += 1

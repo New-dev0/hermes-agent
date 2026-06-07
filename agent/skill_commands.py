@@ -77,14 +77,14 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
             # skill_view() refuses to load.
             for root in trusted_roots:
                 try:
-                    normalized = str(identifier_path.relative_to(root))
+                    normalized = identifier_path.relative_to(root).as_posix()
                     break
                 except ValueError:
                     continue
 
             if normalized is None:
                 try:
-                    normalized = str(identifier_path.resolve().relative_to(SKILLS_DIR.resolve()))
+                    normalized = identifier_path.resolve().relative_to(SKILLS_DIR.resolve()).as_posix()
                 except Exception:
                     normalized = raw_identifier
         else:
@@ -230,12 +230,12 @@ def _build_skill_message(
             if subdir_path.exists():
                 for f in sorted(subdir_path.rglob("*")):
                     if f.is_file() and not f.is_symlink():
-                        rel = str(f.relative_to(skill_dir))
+                        rel = f.relative_to(skill_dir).as_posix()
                         supporting.append(rel)
 
     if supporting and skill_dir:
         try:
-            skill_view_target = str(skill_dir.relative_to(SKILLS_DIR))
+            skill_view_target = skill_dir.relative_to(SKILLS_DIR).as_posix()
         except ValueError:
             # Skill is from an external dir — use the skill name instead
             skill_view_target = skill_dir.name

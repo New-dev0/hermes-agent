@@ -25,8 +25,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, get_skills_dir
 from agent.skill_utils import is_excluded_skill_path
+from tools.runtime_paths import RuntimePath, runtime_path
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urljoin, urlparse, urlunparse
 
@@ -46,20 +47,36 @@ logger = logging.getLogger(__name__)
 # Paths
 # ---------------------------------------------------------------------------
 
-HERMES_HOME = get_hermes_home()
-SKILLS_DIR = HERMES_HOME / "skills"
-HUB_DIR = SKILLS_DIR / ".hub"
-LOCK_FILE = HUB_DIR / "lock.json"
-QUARANTINE_DIR = HUB_DIR / "quarantine"
-AUDIT_LOG = HUB_DIR / "audit.log"
-TAPS_FILE = HUB_DIR / "taps.json"
-INDEX_CACHE_DIR = HUB_DIR / "index-cache"
+HERMES_HOME = RuntimePath(get_hermes_home, "HERMES_HOME")
+SKILLS_DIR = RuntimePath(get_skills_dir, "SKILLS_DIR")
+HUB_DIR = RuntimePath(lambda: runtime_path(SKILLS_DIR) / ".hub", "HUB_DIR")
+LOCK_FILE = RuntimePath(lambda: runtime_path(HUB_DIR) / "lock.json", "LOCK_FILE")
+QUARANTINE_DIR = RuntimePath(
+    lambda: runtime_path(HUB_DIR) / "quarantine", "QUARANTINE_DIR"
+)
+AUDIT_LOG = RuntimePath(lambda: runtime_path(HUB_DIR) / "audit.log", "AUDIT_LOG")
+TAPS_FILE = RuntimePath(lambda: runtime_path(HUB_DIR) / "taps.json", "TAPS_FILE")
+INDEX_CACHE_DIR = RuntimePath(
+    lambda: runtime_path(HUB_DIR) / "index-cache", "INDEX_CACHE_DIR"
+)
 
 # Cache duration for remote index fetches
 INDEX_CACHE_TTL = 3600  # 1 hour
 
 _REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
 _MAX_SKILL_FETCH_REDIRECTS = 5
+_TEXT_HASH_SUFFIXES = {
+    ".md",
+    ".txt",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".py",
+    ".js",
+    ".ts",
+    ".sh",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -2862,9 +2879,12 @@ class OptionalSkillSource(SkillSource):
                 and "__pycache__" not in f.parts
                 and f.suffix != ".pyc"
             ):
-                rel_path = str(f.relative_to(skill_dir))
+                rel_path = f.relative_to(skill_dir).as_posix()
                 try:
-                    files[rel_path] = f.read_bytes()
+                    data = f.read_bytes()
+                    if f.suffix.lower() in _TEXT_HASH_SUFFIXES:
+                        data = data.replace(b"\r\n", b"\n")
+                    files[rel_path] = data
                 except OSError:
                     continue
 
@@ -2932,7 +2952,7 @@ class OptionalSkillSource(SkillSource):
                 if isinstance(hermes_meta, dict):
                     tags = hermes_meta.get("tags", [])
 
-            rel_path = str(parent.relative_to(self._optional_dir))
+            rel_path = parent.relative_to(self._optional_dir).as_posix()
 
             results.append(SkillMeta(
                 name=name,
@@ -3021,8 +3041,8 @@ def _skill_meta_to_dict(meta: SkillMeta) -> dict:
 class HubLockFile:
     """Manages skills/.hub/lock.json — tracks provenance of installed hub skills."""
 
-    def __init__(self, path: Path = LOCK_FILE):
-        self.path = path
+    def __init__(self, path: Optional[Path] = None):
+        self.path = runtime_path(path) if path is not None else runtime_path(LOCK_FILE)
 
     def load(self) -> dict:
         if not self.path.exists():
@@ -3093,8 +3113,8 @@ class HubLockFile:
 class TapsManager:
     """Manages the taps.json file — custom GitHub repo sources."""
 
-    def __init__(self, path: Path = TAPS_FILE):
-        self.path = path
+    def __init__(self, path: Optional[Path] = None):
+        self.path = runtime_path(path) if path is not None else runtime_path(TAPS_FILE)
 
     def load(self) -> List[dict]:
         if not self.path.exists():
@@ -3264,7 +3284,7 @@ def install_from_quarantine(
         trust_level=bundle.trust_level,
         scan_verdict=scan_result.verdict,
         skill_hash=content_hash(install_dir),
-        install_path=str(install_dir.relative_to(SKILLS_DIR)),
+        install_path=install_dir.relative_to(SKILLS_DIR).as_posix(),
         files=list(bundle.files.keys()),
         metadata=bundle.metadata,
     )
@@ -3318,9 +3338,12 @@ def bundle_content_hash(bundle: SkillBundle) -> str:
         h.update(b"\x00")
         content = bundle.files[rel_path]
         if isinstance(content, bytes):
-            h.update(content)
+            data = content
         else:
-            h.update(content.encode("utf-8"))
+            data = content.replace("\r\n", "\n").encode("utf-8")
+        if Path(rel_path).suffix.lower() in _TEXT_HASH_SUFFIXES:
+            data = data.replace(b"\r\n", b"\n")
+        h.update(data)
     return f"sha256:{h.hexdigest()[:16]}"
 
 

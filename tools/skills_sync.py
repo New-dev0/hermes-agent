@@ -28,17 +28,25 @@ import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from hermes_constants import get_bundled_skills_dir, get_hermes_home, get_optional_skills_dir
+from hermes_constants import (
+    get_bundled_skills_dir,
+    get_hermes_home,
+    get_optional_skills_dir,
+    get_skills_dir,
+)
 from agent.skill_utils import is_excluded_skill_path
 from typing import Dict, List, Tuple
 from utils import atomic_replace
+from tools.runtime_paths import RuntimePath, runtime_path
 
 logger = logging.getLogger(__name__)
 
 
-HERMES_HOME = get_hermes_home()
-SKILLS_DIR = HERMES_HOME / "skills"
-MANIFEST_FILE = SKILLS_DIR / ".bundled_manifest"
+HERMES_HOME = RuntimePath(get_hermes_home, "HERMES_HOME")
+SKILLS_DIR = RuntimePath(get_skills_dir, "SKILLS_DIR")
+MANIFEST_FILE = RuntimePath(
+    lambda: runtime_path(SKILLS_DIR) / ".bundled_manifest", "MANIFEST_FILE"
+)
 
 # Marker file written by `hermes profile create --no-skills` (named profiles)
 # and by the installer's `--no-skills` flag (the default ~/.hermes profile).

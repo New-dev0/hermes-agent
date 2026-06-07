@@ -39,11 +39,12 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
-from hermes_constants import get_hermes_home, display_hermes_home
+from hermes_constants import get_hermes_home, get_skills_dir, display_hermes_home
 from typing import Dict, Any, List, Optional, Tuple
 
 from utils import atomic_replace, is_truthy_value
 from hermes_cli.config import cfg_get
+from tools.runtime_paths import RuntimePath
 
 logger = logging.getLogger(__name__)
 
@@ -104,9 +105,10 @@ def _security_scan_skill(skill_dir: Path) -> Optional[str]:
 import yaml
 
 
-# All skills live in ~/.hermes/skills/ (single source of truth)
-HERMES_HOME = get_hermes_home()
-SKILLS_DIR = HERMES_HOME / "skills"
+# Public path constants stay path-like for old callers/tests, but resolve at
+# call time so API-scoped Hermes profiles do not share an import-time path.
+HERMES_HOME = RuntimePath(get_hermes_home, "HERMES_HOME")
+SKILLS_DIR = RuntimePath(get_skills_dir, "SKILLS_DIR")
 
 MAX_NAME_LENGTH = 64
 MAX_DESCRIPTION_LENGTH = 1024
@@ -527,7 +529,7 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
     result = {
         "success": True,
         "message": f"Skill '{name}' created.",
-        "path": str(skill_dir.relative_to(SKILLS_DIR)),
+        "path": skill_dir.relative_to(SKILLS_DIR).as_posix(),
         "skill_md": str(skill_md),
     }
     if category:
@@ -798,7 +800,7 @@ def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
             if d.exists():
                 for f in d.rglob("*"):
                     if f.is_file():
-                        available.append(str(f.relative_to(skill_dir)))
+                        available.append(f.relative_to(skill_dir).as_posix())
         return {
             "success": False,
             "error": f"File '{file_path}' not found in skill '{name}'.",
