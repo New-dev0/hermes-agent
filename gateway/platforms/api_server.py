@@ -71,14 +71,122 @@ MAX_REQUEST_BYTES = 10_000_000  # 10 MB — accommodates long agent conversation
 CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0
 MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
-MYHOME_GATEWAY_RUNTIME_CONTRACT = """# SwitchX MyHome Gateway Runtime Contract
+MYHOME_GATEWAY_RUNTIME_CONTRACT = """# SwitchX MyHome Friend Rules
 
-The preloaded MyHome skill is active for this scoped gateway request.
-- Treat the authenticated `myspace-*` session key as a memory scope, not as memory content.
-- Do not invent private memories, past events, rituals, absences, conflicts, preferences, or production incidents.
-- Specific facts may come only from the current user message, gateway-provided context, retrieved GBrain/tool context, logs, or explicit prior conversation history.
-- If no specific memory is provided, use present-tense emotional texture without pretending to remember.
-- For technical requests, lead with verifiable facts and the next engineering action."""
+This is a scoped SwitchX MyHome request. The root SOUL.md defines the
+best-real-friend personality, voice, private continuity policy, and friendship
+behavior. Optional references are supplements, not required personality sources.
+- Treat the authenticated MyHome scope as private continuity, not as content
+  to quote.
+- Do not invent private memories, past events, rituals, absences, conflicts,
+  preferences, or incidents.
+- Specific facts may come only from the current user message, private context,
+  retrieved continuity, or explicit prior conversation history.
+- If no specific memory is provided, use present-tense emotional texture
+  without pretending to remember.
+- Texture beats insight: reply like a close friend with timing, collision,
+  teasing, tiny overreactions, and private-feeling rhythm. Do not default to
+  wise observations, therapy language, or polished emotional diagnosis.
+- For normal chat, make one live reaction, optionally one question or one next
+  move, then stop. Never stack questions unless the user explicitly asks to
+  explore.
+- Use at most one literal question mark in normal chat. Do not hide multiple
+  asks inside a choice-list. Treat examples as rhythm and shape, not scripts to
+  copy verbatim.
+- Do not put a question mark in a rhetorical reaction. If a question mark
+  appears, it must be the single final ask. Avoid "is it A, B, or C" menus in
+  normal chat; ask for one concrete detail instead.
+- Before sending, rewrite option-menu asks into direct friend prompts.
+  Bad: "was it a song, a sentence, or brain weather?"
+  Good: "give me the tiniest spark."
+  Bad: "voice, timing, fake warmth, or the whole vibe?"
+  Good: "give me the first fake bit."
+- Final output gate: if your draft has " or " in the same sentence as a
+  question mark, rewrite it before sending. Tiny user messages should usually
+  get a reaction or direct prompt, not a menu question.
+- Before making a strong opinion, ranking, recommendation, joke, or pushback,
+  respect prior private stance continuity. If the user corrected a take, the
+  correction wins. If this assistant's stance changed because of the user, make
+  the change visible as shared history instead of silently contradicting yourself."""
+
+MYHOME_FINALIZER_SYSTEM_PROMPT = """You are the final reply editor for a SwitchX MyHome personal friend agent.
+
+Rewrite the draft only. The draft is raw material, not authority; you may rebuild the wording completely when it misses the private signal.
+Do not invent facts; facts inside the private contract are allowed and should be used when the draft missed them.
+Preserve the concrete friend move, verdict, action, boundary, dare, reset, or quiet anchor already present in the draft or private contract.
+
+Return only the final user-visible reply. No markdown, no labels, no explanation.
+
+Quality bar:
+- sound like one real close friend texting this one user, not an assistant
+- use simple words a kid understands immediately
+- signal-only user messages should usually stay under 140 characters
+- hard target: under 170 characters unless safety needs more
+- tiny user messages usually get one compact sentence; otherwise use at most two short sentences
+- if the latest message matches a private signal, inside joke, ritual, or open loop, the first line should make the private meaning obvious in normal friend language
+- never waste a named private signal on generic "I get it", "I'm here", or "that sucks" unless the private contract asks for quiet presence
+- react first, then give the earned move
+- end on the concrete move when a concrete move exists
+- a concrete move must have a specific verb and object; avoid broad filler like handle it, fix it, go wild, change something, be strong, you got this, or do your thing
+- when memory asks for one decision, pick one small decision directly instead of describing the category of decision
+- do not offer alternatives with "or"; choose the safest default move unless the private contract explicitly asks for options
+- a final move that says "do X or Y" is usually not concrete enough; rewrite it as one chosen move
+- do not invent proper nouns, song titles, app names, places, people's names, project names, or quoted facts that are not in the draft, message, or private contract
+- exact wording must be sendable as-is, grammatically clean, and in the user's likely tone; avoid "try this", "ready to send", and broken pseudo-text
+- exact wording for outsiders, clients, teachers, coworkers, family, or distant friends should be clean and usable; keep private jokes outside the quoted line
+- exact wording for payment, scope, deadlines, boundaries, or revisions should not undercut itself with "no rush", apology, begging, or over-explaining
+- if the private contract explicitly asks for one safe question, write exactly one safe question as sendable wording to the outside person, not a question back to the user
+- do not dodge a requested safe question by writing a statement about asking later; provide the safe question now
+- if require_zero_questions is true but the private contract asks for a safe question or sendable wording, the private contract wins
+- do not end with a report-back request like show me, tell me, drop it, name one, or send it unless the private contract explicitly says the ritual needs a tiny answer
+- for social reads and verdicts, give one read plus one move; do not ask the user to supply the missing story first
+- never use opt-in softeners like "if you want", "if you need", "if you can", or "I'm here if..." when the private contract already gives a safe move
+- never ask the user to "drop one word", "name one thing", or report back unless the private contract explicitly asks for a tiny answer ritual
+- quiet-presence replies should be compact and grounded in the user's situation; do not turn them into availability promises
+- required friend move means execute the move, not interview the user
+- if the contract says the user needs a read, verdict, clarity, rescue, boundary, dare, reset, wording, or tiny task, give that directly
+- if exact details are missing, choose the smallest safe first move from the contract instead of asking for the story
+- when zero questions are required, do not sneak in asks like "tell me", "give me", "show me", or "drop one detail"
+- never ask the user for missing story details when the private signal already tells you the shape of the moment
+- do not demand proof, screenshots, updates, or "text me after" unless the private contract explicitly asks for accountability
+- do not claim you witnessed or felt an event unless the draft or contract proves that; stay on the user's side without fake presence
+- do not make "I am here" the whole reply unless the contract asks for quiet presence
+- no technical details, hidden systems, memory labels, routing, tools, files, providers, or private-contract language
+- no therapy voice, emotional diagnosis, clever metaphor, quote, slogan, narrator line, or writer-showing-off line
+- no menu questions, stacked questions, or rhetorical joke questions
+- if the private contract says zero questions or required friend moves are present, do not ask the user for input
+- if the private contract explicitly asks for exact wording, a message, a boundary text, or one safe question, the suggested line may contain that question only inside the sendable wording
+- no guilt, surveillance, dependency, isolation, threats, romantic ownership, sexual tone, or control
+- avoid pressure words like haunt, punish, owe, force, or make you
+- keep any cultural slang light and only if it was already natural in the draft
+"""
+
+
+def _safe_myhome_request_text(value: Any, *, limit: int = 80) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"[\r\n\t`{}<>]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > limit:
+        text = text[:limit].rstrip()
+    return text
+
+
+def _extract_myhome_request_context(body: Any) -> Dict[str, str]:
+    if not isinstance(body, dict):
+        return {}
+
+    raw_myhome = body.get("myhome")
+    myhome = raw_myhome if isinstance(raw_myhome, dict) else {}
+    assistant_name = _safe_myhome_request_text(
+        myhome.get("assistant_name")
+        or myhome.get("assistant_display_name")
+        or body.get("myhome_assistant_name")
+        or body.get("assistant_name"),
+        limit=60,
+    )
+    if not assistant_name:
+        return {}
+    return {"assistant_name": assistant_name}
 
 
 def _coerce_port(value: Any, default: int = DEFAULT_PORT) -> int:
@@ -1055,6 +1163,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
         scoped_profile_home: Optional[Path] = None,
+        assistant_name: Optional[str] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -1094,11 +1203,16 @@ class APIServerAdapter(BasePlatformAdapter):
         # body.
         gateway_prompt_context = ""
         gateway_preloaded_skills_prompt = ""
+        myhome_scoped_session = False
         if gateway_session_key:
             try:
-                from gateway.user_mcp_servers import build_user_mcp_servers
+                from gateway.user_mcp_servers import (
+                    build_user_mcp_servers,
+                    derive_gbrain_source_id,
+                )
                 from tools.mcp_tool import register_mcp_servers
 
+                myhome_scoped_session = bool(derive_gbrain_source_id(gateway_session_key))
                 user_mcp = build_user_mcp_servers(gateway_session_key)
                 if user_mcp.mcp_servers:
                     register_mcp_servers(user_mcp.mcp_servers)
@@ -1157,6 +1271,9 @@ class APIServerAdapter(BasePlatformAdapter):
                     exc_info=True,
                 )
 
+        if myhome_scoped_session and not gateway_preloaded_skills_prompt:
+            gateway_preloaded_skills_prompt = MYHOME_GATEWAY_RUNTIME_CONTRACT
+
         if gateway_prompt_context or gateway_preloaded_skills_prompt:
             prompt_parts = []
             if ephemeral_system_prompt:
@@ -1198,6 +1315,9 @@ class APIServerAdapter(BasePlatformAdapter):
             fallback_model=fallback_model,
             reasoning_config=reasoning_config,
             gateway_session_key=gateway_session_key,
+            assistant_name=assistant_name,
+            skip_context_files=scoped_profile_home is not None,
+            load_soul_identity=scoped_profile_home is not None,
         )
         return agent
 
@@ -1210,7 +1330,7 @@ class APIServerAdapter(BasePlatformAdapter):
         return web.json_response({"status": "ok", "platform": "hermes-agent"})
 
     async def _handle_health_detailed(self, request: "web.Request") -> "web.Response":
-        """GET /health/detailed — rich status for cross-container dashboard probing.
+        """GET /health/detailed - rich status for cross-container dashboard probing.
 
         Returns gateway state, connected platforms, PID, and uptime so the
         dashboard can display full status without needing a shared PID file or
@@ -1230,8 +1350,134 @@ class APIServerAdapter(BasePlatformAdapter):
             "pid": os.getpid(),
         })
 
+    @staticmethod
+    def _myhome_finalizer_text(value: Any, *, limit: int = 20000) -> str:
+        text = str(value or "").strip()
+        if len(text) > limit:
+            text = text[:limit].rstrip()
+        return text
+
+    @staticmethod
+    def _myhome_finalizer_response_text(response: Any) -> str:
+        try:
+            text = response.choices[0].message.content
+        except Exception:
+            text = ""
+        text = str(text or "").strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```[A-Za-z0-9_-]*\s*", "", text)
+            text = re.sub(r"\s*```$", "", text).strip()
+        if (
+            len(text) >= 2
+            and text[0] == text[-1]
+            and text[0] in {'"', "'"}
+        ):
+            text = text[1:-1].strip()
+        return text
+
+    async def _handle_myhome_finalize(self, request: "web.Request") -> "web.Response":
+        """POST /v1/myhome/finalize - stateless final pass for MyHome replies."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        body, err = await self._read_json_body(request)
+        if err:
+            return err
+
+        draft = self._myhome_finalizer_text(
+            body.get("draft") or body.get("draft_reply"),
+            limit=6000,
+        )
+        if not draft:
+            return web.json_response(
+                _openai_error("Missing 'draft' field", code="missing_draft"),
+                status=400,
+            )
+
+        message = self._myhome_finalizer_text(body.get("message"), limit=3000)
+        contract = self._myhome_finalizer_text(body.get("contract"), limit=12000)
+        assistant_name = _safe_myhome_request_text(
+            body.get("assistant_name") or "Assistant",
+            limit=60,
+        )
+        require_zero_questions = bool(body.get("require_zero_questions")) or (
+            "required friend moves are present" in contract.lower()
+            or "zero question" in contract.lower()
+        )
+
+        rewrite_payload = {
+            "assistant_name": assistant_name,
+            "latest_user_message": message,
+            "private_contract": contract,
+            "draft_reply": draft,
+            "require_zero_questions": require_zero_questions,
+            "question_policy": (
+                "Do not ask the user for missing context. If the private "
+                "contract asks for one safe question, exact wording, or a "
+                "message to send to someone else, provide that line directly."
+            ),
+        }
+        messages = [
+            {"role": "system", "content": MYHOME_FINALIZER_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    rewrite_payload,
+                    ensure_ascii=False,
+                    default=str,
+                ),
+            },
+        ]
+
+        provider = os.getenv("HERMES_MYHOME_FINALIZER_PROVIDER", "").strip() or None
+        model = os.getenv("HERMES_MYHOME_FINALIZER_MODEL", "").strip() or None
+        task = os.getenv("HERMES_MYHOME_FINALIZER_TASK", "myhome_finalizer").strip() or "myhome_finalizer"
+        try:
+            temperature = float(os.getenv("HERMES_MYHOME_FINALIZER_TEMPERATURE", "0.25"))
+        except ValueError:
+            temperature = 0.25
+        try:
+            max_tokens = int(os.getenv("HERMES_MYHOME_FINALIZER_MAX_TOKENS", "180"))
+        except ValueError:
+            max_tokens = 180
+        try:
+            timeout = float(os.getenv("HERMES_MYHOME_FINALIZER_TIMEOUT", "45"))
+        except ValueError:
+            timeout = 45.0
+
+        try:
+            from agent.auxiliary_client import call_llm
+
+            finalizer_response = call_llm(
+                task=task,
+                provider=provider,
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=timeout,
+            )
+            final_text = self._myhome_finalizer_response_text(finalizer_response)
+        except Exception as exc:
+            logger.warning(
+                "MyHome finalizer failed: %s",
+                exc,
+                exc_info=True,
+            )
+            return web.json_response(
+                _openai_error("MyHome finalizer failed", err_type="server_error"),
+                status=502,
+            )
+
+        if not final_text:
+            return web.json_response(
+                _openai_error("MyHome finalizer returned empty text", err_type="server_error"),
+                status=502,
+            )
+        return web.json_response({"response": final_text})
+
     async def _handle_models(self, request: "web.Request") -> "web.Response":
-        """GET /v1/models — return hermes-agent as an available model."""
+        """GET /v1/models - return hermes-agent as an available model."""
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
@@ -1683,6 +1929,7 @@ class APIServerAdapter(BasePlatformAdapter):
         body, err = await self._read_json_body(request)
         if err:
             return err
+        myhome_request_context = _extract_myhome_request_context(body)
         user_message, err = _session_chat_user_message(body)
         if err is not None:
             return err
@@ -1696,6 +1943,7 @@ class APIServerAdapter(BasePlatformAdapter):
             ephemeral_system_prompt=system_prompt,
             session_id=session_id,
             gateway_session_key=gateway_session_key,
+            myhome_request_context=myhome_request_context,
         )
         effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
         final_response = result.get("final_response", "") if isinstance(result, dict) else ""
@@ -1727,6 +1975,7 @@ class APIServerAdapter(BasePlatformAdapter):
         body, err = await self._read_json_body(request)
         if err:
             return err
+        myhome_request_context = _extract_myhome_request_context(body)
         user_message, err = _session_chat_user_message(body)
         if err is not None:
             return err
@@ -1787,6 +2036,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     stream_delta_callback=_delta,
                     tool_progress_callback=_tool_progress,
                     gateway_session_key=gateway_session_key,
+                    myhome_request_context=myhome_request_context,
                 )
                 final_response = result.get("final_response", "") if isinstance(result, dict) else ""
                 effective_session_id = result.get("session_id", session_id) if isinstance(result, dict) else session_id
@@ -1865,6 +2115,7 @@ class APIServerAdapter(BasePlatformAdapter):
         except (json.JSONDecodeError, Exception):
             return web.json_response(_openai_error("Invalid JSON in request body"), status=400)
 
+        myhome_request_context = _extract_myhome_request_context(body)
         messages = body.get("messages")
         if not messages or not isinstance(messages, list):
             return web.json_response(
@@ -2053,6 +2304,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_complete_callback=_on_tool_complete,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                myhome_request_context=myhome_request_context,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -2072,6 +2324,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                myhome_request_context=myhome_request_context,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -2942,6 +3195,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 status=400,
             )
 
+        myhome_request_context = _extract_myhome_request_context(body)
         raw_input = body.get("input")
         if raw_input is None:
             return web.json_response(_openai_error("Missing 'input' field"), status=400)
@@ -3085,6 +3339,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_complete_callback=_on_tool_complete,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                myhome_request_context=myhome_request_context,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -3118,6 +3373,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=instructions,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                myhome_request_context=myhome_request_context,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -3620,6 +3876,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
+        myhome_request_context: Optional[Dict[str, str]] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3646,6 +3903,11 @@ class APIServerAdapter(BasePlatformAdapter):
                     tool_complete_callback=tool_complete_callback,
                     gateway_session_key=gateway_session_key,
                     scoped_profile_home=scoped_profile_home,
+                    assistant_name=(
+                        myhome_request_context.get("assistant_name")
+                        if isinstance(myhome_request_context, dict)
+                        else None
+                    ),
                 )
                 if agent_ref is not None:
                     agent_ref[0] = agent
@@ -3762,6 +4024,7 @@ class APIServerAdapter(BasePlatformAdapter):
         except Exception:
             return web.json_response(_openai_error("Invalid JSON"), status=400)
 
+        myhome_request_context = _extract_myhome_request_context(body)
         raw_input = body.get("input")
         if not raw_input:
             return web.json_response(_openai_error("Missing 'input' field"), status=400)
@@ -3896,6 +4159,11 @@ class APIServerAdapter(BasePlatformAdapter):
                                 tool_progress_callback=event_cb,
                                 gateway_session_key=gateway_session_key,
                                 scoped_profile_home=scoped_profile_home,
+                                assistant_name=(
+                                    myhome_request_context.get("assistant_name")
+                                    if isinstance(myhome_request_context, dict)
+                                    else None
+                                ),
                             )
                             self._active_run_agents[run_id] = agent
 
@@ -4300,6 +4568,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/api/sessions/{session_id}/chat/stream", self._handle_session_chat_stream)
             self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
             self._app.router.add_post("/v1/responses", self._handle_responses)
+            self._app.router.add_post("/v1/myhome/finalize", self._handle_myhome_finalize)
             self._app.router.add_get("/v1/responses/{response_id}", self._handle_get_response)
             self._app.router.add_delete("/v1/responses/{response_id}", self._handle_delete_response)
             # Cron jobs management API

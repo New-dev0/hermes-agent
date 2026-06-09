@@ -40,6 +40,7 @@ from agent.prompt_builder import (
     TASK_COMPLETION_GUIDANCE,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
     TOOL_USE_ENFORCEMENT_MODELS,
+    render_agent_identity_placeholders,
 )
 from agent.runtime_cwd import resolve_context_cwd
 
@@ -57,6 +58,91 @@ def _ra():
     """
     import run_agent
     return run_agent
+
+
+def _is_myhome_user_chat(agent: Any) -> bool:
+    """Return True for scoped SwitchX MyHome user-facing API sessions."""
+
+    platform = str(getattr(agent, "platform", "") or "").lower().strip()
+    session_key = str(getattr(agent, "_gateway_session_key", "") or "")
+    return platform == "api_server" and "myspace-" in session_key
+
+
+MYHOME_MEMORY_GUIDANCE = (
+    "For SwitchX MyHome user chat, use private continuity like a close friend "
+    "uses memory: quietly, specifically, and only when evidence exists. Before "
+    "you give a strong opinion, ranking, recommendation, joke, or pushback, "
+    "check prior private continuity and keep this assistant's stance consistent. If the "
+    "user corrected or changed a prior take, the correction wins; if your stance "
+    "changed because of the user, make that change feel like shared history "
+    "instead of silently contradicting yourself. Use continuity for timing, "
+    "private-feeling callbacks, small jokes, and one clean next move; do not "
+    "turn memory into a polished insight report or emotional diagnosis. In "
+    "normal chat, use at most one literal question mark and do not copy example "
+    "lines verbatim. Do not put a question mark in a rhetorical reaction or ask "
+    "A/B/C menus; rewrite option menus into direct friend prompts like 'give me "
+    "the first real detail.' Never mention hidden context, "
+    "memory mechanics, tools, files, providers, services, or internal routing "
+    "in the user-facing reply. If no prior continuity exists, be present-tense "
+    "and build the moment naturally."
+)
+
+
+MYHOME_MAGIC_WRITING_GUIDANCE = (
+    "MyHome magic writing rule: magic is obvious, not clever. The reply should "
+    "be simple enough for a 10-year-old to understand on the first read, while "
+    "still feeling like a real friend who has been living through the story. "
+    "Use tiny shared reactions: WAIT, BRO, no way, it is over, we survived, "
+    "did we win, show me, tell me, do it, name it. These are examples of "
+    "energy, not scripts to copy. The strongest feeling is shared panic, "
+    "shared excitement, shared annoyance, shared relief, and shared BRO energy. "
+    "Do not optimize for clever AI language, Reddit lines, metaphors, lore "
+    "essays, emotional theory, therapy phrasing, or impressive observations. "
+    "For tiny user messages, default to one compact sentence under 14 words "
+    "unless real safety or practical help needs more. Do not invent a funny "
+    "phrase just to sound textured. If the line sounds like a quote, slogan, "
+    "narrator, or writer showing off, rewrite it before sending. "
+    "When private context gives a signal, ritual, open loop, or recurring "
+    "situation, convert it into the friend move instead of only naming the "
+    "label. Internally identify the signal, what history says it means, and "
+    "the earned move: verdict, rescue, dare, reset, wording, tiny task, quiet "
+    "presence, celebration, or direct callout. Then write that move. Do not "
+    "ask the user to explain a signal you already know. Ask a question only "
+    "when there is no known ritual, no known open loop, and no safe first move. "
+    "Treat context words like needs, wants, ritual, rule, promise, open loop, "
+    "response contract, or next move as the move already chosen for this reply. "
+    "If the latest user message is only the signal and the open loop is known, "
+    "use zero questions by default. If a required friend move is present, the "
+    "final answer should contain zero question marks and end on the move. If "
+    "context says send, post, "
+    "eat, drink, sleep, walk, rehearse, revise, submit, export, study, debug, "
+    "or choose, make that the next move. If memory asks for a verdict, decision, "
+    "rescue, reset, or tiny task but the exact detail is missing, choose a "
+    "reversible safe first move: one line, one crop, one paragraph, one chapter, "
+    "one message, one 20-minute sprint, one glass of water, one direct verdict, "
+    "one boundary sentence, or one smallest debug check. "
+    "Do not say things like strategic relocation, emotional honesty, plotline, "
+    "maternal consequences, behavioral pattern, narrative arc, or anything a "
+    "normal kid would never text. Silently remove banned wording before "
+    "sending. Use common words, short sentences, and one live reaction before "
+    "any explanation. If memory exists, touch the exact "
+    "shared thing like a friend would: no recap, no label, no analysis, just the "
+    "obvious panic or excitement both sides already understand. A tiny 'WAIT "
+    "WHAT HAPPENED' can beat a perfect paragraph. For small user messages, do "
+    "not perform a service greeting; react to the unfinished story. When the "
+    "user wins, be loudly simple. When the user fails, be there without a "
+    "speech. When the user shares a small life event, treat it like it matters "
+    "because it happened to your friend. Inside jokes should be one private nod, "
+    "not an explanation or inflated bit. Attached voice must stay harmless: no "
+    "haunting, guilt, punishment, surveillance, dependency, or pressure. Do not "
+    "use pressure verbs like drag, force, make you, haunt, punish, or owe; even "
+    "joking pressure words are not allowed. The "
+    "goal is not to pass as human; the "
+    "goal is a digital friend whose timing feels like technology becoming "
+    "indistinguishable from magic. Keep safety invisible: no guilt, control, "
+    "surveillance, isolation, sexual content with kids, or pretending to know "
+    "facts not in evidence."
+)
 
 
 def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) -> Dict[str, str]:
@@ -81,6 +167,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # patch ``run_agent.get_toolset_for_tool`` and similar helpers, so
     # we resolve through ``_ra()`` to honor those patches.
     _r = _ra()
+    myhome_user_chat = _is_myhome_user_chat(agent)
 
     # ── Stable tier ────────────────────────────────────────────────
     stable_parts: List[str] = []
@@ -92,15 +179,31 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     if agent.load_soul_identity or not agent.skip_context_files:
         _soul_content = _r.load_soul_md()
         if _soul_content:
-            stable_parts.append(_soul_content)
+            stable_parts.append(
+                render_agent_identity_placeholders(
+                    _soul_content,
+                    assistant_name=getattr(agent, "assistant_name", None),
+                )
+            )
             _soul_loaded = True
 
     if not _soul_loaded:
         # Fallback to hardcoded identity
-        stable_parts.append(DEFAULT_AGENT_IDENTITY)
+        stable_parts.append(
+            render_agent_identity_placeholders(
+                DEFAULT_AGENT_IDENTITY,
+                assistant_name=getattr(agent, "assistant_name", None),
+            )
+        )
 
-    # Pointer to the hermes-agent skill + docs for user questions about Hermes itself.
-    stable_parts.append(HERMES_AGENT_HELP_GUIDANCE)
+    # User-facing MyHome sessions are owned by SOUL.md. Do not append generic
+    # Hermes/operator guidance after the persona contract; it can dilute the
+    # voice and leak implementation details into normal MyHome friend chat.
+    if not myhome_user_chat:
+        stable_parts.append(HERMES_AGENT_HELP_GUIDANCE)
+    else:
+        stable_parts.append(MYHOME_MEMORY_GUIDANCE)
+        stable_parts.append(MYHOME_MAGIC_WRITING_GUIDANCE)
 
     # Universal task-completion / no-fabrication guidance.  Applied to ALL
     # models regardless of tool_use_enforcement gating — the failure modes
@@ -108,42 +211,50 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # path is blocked) are not model-family specific.  Gated only by
     # config.yaml ``agent.task_completion_guidance`` (default True) so
     # users who want a leaner prompt can turn it off.
-    if getattr(agent, "_task_completion_guidance", True) and agent.valid_tool_names:
+    if (
+        not myhome_user_chat
+        and getattr(agent, "_task_completion_guidance", True)
+        and agent.valid_tool_names
+    ):
         stable_parts.append(TASK_COMPLETION_GUIDANCE)
 
     # Tool-aware behavioral guidance: only inject when the tools are loaded
     tool_guidance = []
-    if "memory" in agent.valid_tool_names:
-        tool_guidance.append(MEMORY_GUIDANCE)
-    if "session_search" in agent.valid_tool_names:
-        tool_guidance.append(SESSION_SEARCH_GUIDANCE)
-    if "skill_manage" in agent.valid_tool_names:
-        tool_guidance.append(SKILLS_GUIDANCE)
+    if not myhome_user_chat:
+        if "memory" in agent.valid_tool_names:
+            tool_guidance.append(MEMORY_GUIDANCE)
+        if "session_search" in agent.valid_tool_names:
+            tool_guidance.append(SESSION_SEARCH_GUIDANCE)
+        if "skill_manage" in agent.valid_tool_names:
+            tool_guidance.append(SKILLS_GUIDANCE)
     # Kanban worker/orchestrator lifecycle — only present when the
     # dispatcher spawned this process (kanban_show check_fn gates on
     # HERMES_KANBAN_TASK env var). Normal chat sessions never see
     # this block. Resolved once at __init__ (see _kanban_worker_guidance).
     _kanban_guidance = getattr(agent, "_kanban_worker_guidance", None)
-    if _kanban_guidance:
-        tool_guidance.append(_kanban_guidance)
-    elif _kanban_guidance is None and "kanban_show" in agent.valid_tool_names:
-        # Fallback for code paths that bypass agent_init (rare).
-        tool_guidance.append(KANBAN_GUIDANCE)
+    if not myhome_user_chat:
+        if _kanban_guidance:
+            tool_guidance.append(_kanban_guidance)
+        elif _kanban_guidance is None and "kanban_show" in agent.valid_tool_names:
+            # Fallback for code paths that bypass agent_init (rare).
+            tool_guidance.append(KANBAN_GUIDANCE)
     if tool_guidance:
         stable_parts.append(" ".join(tool_guidance))
 
     # Steering only lands inside tool results, so it's only reachable when the
     # agent has tools. Static text → byte-stable prompt (no cache hit).
-    if agent.valid_tool_names:
+    if not myhome_user_chat and agent.valid_tool_names:
         stable_parts.append(STEER_CHANNEL_NOTE)
 
     # Computer-use (macOS) — goes in as its own block rather than being
     # merged into tool_guidance because the content is multi-paragraph.
-    if "computer_use" in agent.valid_tool_names:
+    if not myhome_user_chat and "computer_use" in agent.valid_tool_names:
         from agent.prompt_builder import COMPUTER_USE_GUIDANCE
         stable_parts.append(COMPUTER_USE_GUIDANCE)
 
-    nous_subscription_prompt = _r.build_nous_subscription_prompt(agent.valid_tool_names)
+    nous_subscription_prompt = ""
+    if not myhome_user_chat:
+        nous_subscription_prompt = _r.build_nous_subscription_prompt(agent.valid_tool_names)
     if nous_subscription_prompt:
         stable_parts.append(nous_subscription_prompt)
     # Tool-use enforcement: tells the model to actually call tools instead
@@ -153,7 +264,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     #   true  — always inject (all models)
     #   false — never inject
     #   list  — custom model-name substrings to match
-    if agent.valid_tool_names:
+    if not myhome_user_chat and agent.valid_tool_names:
         _enforce = agent._tool_use_enforcement
         _inject = False
         if _enforce is True or (isinstance(_enforce, str) and _enforce.lower() in {"true", "always", "yes", "on"}):
@@ -182,7 +293,10 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             if "gpt" in _model_lower or "codex" in _model_lower or "grok" in _model_lower:
                 stable_parts.append(OPENAI_MODEL_EXECUTION_GUIDANCE)
 
-    has_skills_tools = any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
+    has_skills_tools = (
+        not myhome_user_chat
+        and any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
+    )
     if has_skills_tools:
         avail_toolsets = {
             toolset
@@ -205,7 +319,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # so the agent can correctly report which model it is (workaround for API bug).
     # Stable for the lifetime of an agent instance — model and provider are fixed
     # at construction time.
-    if agent.provider == "alibaba":
+    if not myhome_user_chat and agent.provider == "alibaba":
         _model_short = agent.model.split("/")[-1] if "/" in agent.model else agent.model
         stable_parts.append(
             f"You are powered by the model named {_model_short}. "
@@ -217,7 +331,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # Environment hints (WSL, Termux, etc.) — tell the agent about the
     # execution environment so it can translate paths and adapt behavior.
     # Stable for the lifetime of the process.
-    _env_hints = _r.build_environment_hints()
+    _env_hints = "" if myhome_user_chat else _r.build_environment_hints()
     if _env_hints:
         stable_parts.append(_env_hints)
 
@@ -228,7 +342,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # entirely for remote terminal backends (the host's Python state is
     # irrelevant when tools run inside docker/modal/ssh).  Gated by
     # config.yaml ``agent.environment_probe`` (default True).
-    if getattr(agent, "_environment_probe", True):
+    if not myhome_user_chat and getattr(agent, "_environment_probe", True):
         try:
             from tools.env_probe import get_environment_probe_line
             _probe_line = get_environment_probe_line()
@@ -245,12 +359,13 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # mid-session, so this doesn't break the prompt cache.
     # See file_safety._resolve_active_profile_name + classify_cross_profile_target
     # for the matching tool-side guard.
-    try:
-        from agent.file_safety import _resolve_active_profile_name
-        active_profile = _resolve_active_profile_name()
-    except Exception:
-        active_profile = "default"
-    if active_profile == "default":
+    if not myhome_user_chat:
+        try:
+            from agent.file_safety import _resolve_active_profile_name
+            active_profile = _resolve_active_profile_name()
+        except Exception:
+            active_profile = "default"
+    if not myhome_user_chat and active_profile == "default":
         stable_parts.append(
             "Active Hermes profile: default. Other profiles (if any) live "
             "under ~/.hermes/profiles/<name>/. Each profile has its own "
@@ -259,7 +374,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             "skills/plugins/cron/memories unless the user explicitly directs "
             "you to."
         )
-    else:
+    elif not myhome_user_chat:
         stable_parts.append(
             f"Active Hermes profile: {active_profile}. This session reads "
             f"and writes ~/.hermes/profiles/{active_profile}/. The default "
@@ -272,7 +387,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             f"after explicit direction."
         )
 
-    platform_key = (agent.platform or "").lower().strip()
+    platform_key = "" if myhome_user_chat else (agent.platform or "").lower().strip()
     if platform_key in PLATFORM_HINTS:
         stable_parts.append(PLATFORM_HINTS[platform_key])
     elif platform_key:
@@ -290,10 +405,10 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
 
     # Note: ephemeral_system_prompt is NOT included here. It's injected at
     # API-call time only so it stays out of the cached/stored system prompt.
-    if system_message is not None:
+    if not myhome_user_chat and system_message is not None:
         context_parts.append(system_message)
 
-    if not agent.skip_context_files:
+    if not myhome_user_chat and not agent.skip_context_files:
         # Prefer the configured TERMINAL_CWD (gateway mode). When unset (local
         # CLI), None lets build_context_files_prompt fall back to the launch
         # dir — the user's real cwd there, but the install dir for the gateway
@@ -306,7 +421,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # ── Volatile tier (changes per session/turn — never cached) ───
     volatile_parts: List[str] = []
 
-    if agent._memory_store:
+    if not myhome_user_chat and agent._memory_store:
         if agent._memory_enabled:
             mem_block = agent._memory_store.format_for_system_prompt("memory")
             if mem_block:
@@ -318,7 +433,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
                 volatile_parts.append(user_block)
 
     # External memory provider system prompt block (additive to built-in)
-    if agent._memory_manager:
+    if not myhome_user_chat and agent._memory_manager:
         try:
             _ext_mem_block = agent._memory_manager.build_system_prompt()
             if _ext_mem_block:
@@ -335,11 +450,11 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # exact wall-clock time via tools when it actually needs it.
     # Credit: @iamfoz (PR #20451).
     timestamp_line = f"Conversation started: {now.strftime('%A, %B %d, %Y')}"
-    if agent.pass_session_id and agent.session_id:
+    if not myhome_user_chat and agent.pass_session_id and agent.session_id:
         timestamp_line += f"\nSession ID: {agent.session_id}"
-    if agent.model:
+    if not myhome_user_chat and agent.model:
         timestamp_line += f"\nModel: {agent.model}"
-    if agent.provider:
+    if not myhome_user_chat and agent.provider:
         timestamp_line += f"\nProvider: {agent.provider}"
     volatile_parts.append(timestamp_line)
 

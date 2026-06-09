@@ -39,6 +39,7 @@ from agent.model_metadata import (
     is_local_endpoint,
     query_ollama_num_ctx,
 )
+from agent.prompt_builder import sanitize_assistant_name
 from agent.process_bootstrap import _install_safe_stdio
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.think_scrubber import StreamingThinkScrubber
@@ -189,6 +190,7 @@ def init_agent(
     chat_type: str = None,
     thread_id: str = None,
     gateway_session_key: str = None,
+    assistant_name: str = None,
     skip_context_files: bool = False,
     load_soul_identity: bool = False,
     skip_memory: bool = False,
@@ -244,6 +246,7 @@ def init_agent(
             output_config.format instead of a trailing-assistant prefill.
         platform (str): The interface platform the user is on (e.g. "cli", "telegram", "discord", "whatsapp").
             Used to inject platform-specific formatting hints into the system prompt.
+        assistant_name (str): Request-scoped assistant display name for identity prompts (optional).
         skip_context_files (bool): If True, skip auto-injection of SOUL.md, AGENTS.md, and .cursorrules
             into the system prompt. Use this for batch processing and data generation to avoid
             polluting trajectories with user-specific persona or project instructions.
@@ -272,6 +275,7 @@ def init_agent(
     agent._chat_type = chat_type
     agent._thread_id = thread_id
     agent._gateway_session_key = gateway_session_key  # Stable per-chat key (e.g. agent:main:telegram:dm:123)
+    agent.assistant_name = sanitize_assistant_name(assistant_name)
     # Pluggable print function — CLI replaces this with _cprint so that
     # raw ANSI status lines are routed through prompt_toolkit's renderer
     # instead of going directly to stdout where patch_stdout's StdoutProxy

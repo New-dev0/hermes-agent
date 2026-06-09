@@ -9,13 +9,16 @@ that trusted scope.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
 import shutil
+import subprocess
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from hermes_constants import get_default_hermes_root
 
@@ -32,13 +35,22 @@ DEFAULT_GBRAIN_TOOLS = (
 )
 
 DEFAULT_CONTEXT_FILES = (
-    ("SOUL.md", "Gateway SOUL.md"),
-    ("MEMORY.md", "Gateway MEMORY.md"),
+    ("MEMORY.md", "Private Continuity"),
 )
-DEFAULT_PRELOAD_SKILLS = ("myhome-companion",)
+# The SwitchX MyHome runtime is owned by the root SOUL.md. These skills are
+# safe shared references for friend voice, writing rhythm, and social context.
+# They must never contain private user facts; private continuity stays in the
+# scoped MyHome memory source.
+DEFAULT_PRELOAD_SKILLS: Tuple[str, ...] = (
+    "myhome-real-friend",
+    "writing-style-skill",
+    "switchx-social-intelligence",
+)
 
 _SOURCE_RE = re.compile(r"^myspace-[A-Za-z0-9][A-Za-z0-9_-]{0,95}$")
 _FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
+_GBRAIN_SOURCE_READY: set[str] = set()
+_GBRAIN_SOURCE_READY_GUARD = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -109,6 +121,146 @@ def _resolve_gbrain_command() -> Optional[str]:
 
     logger.warning("Dynamic GBrain MCP skipped: command %r not found on PATH", configured)
     return None
+
+
+def _gbrain_cli_env(source_id: str, command: str) -> Dict[str, str]:
+    env = os.environ.copy()
+    env["GBRAIN_SOURCE"] = source_id
+    command_dir = os.path.dirname(command)
+    if command_dir:
+        current_path = env.get("PATH", "")
+        env["PATH"] = command_dir + (os.pathsep + current_path if current_path else "")
+    return env
+
+
+def _run_gbrain_cli(
+    source_id: str,
+    args: Sequence[str],
+    *,
+    input_text: Optional[str] = None,
+    timeout: int = 20,
+) -> subprocess.CompletedProcess[str]:
+    command = _resolve_gbrain_command()
+    if not command:
+        raise RuntimeError("gbrain command is not available")
+
+    completed = subprocess.run(
+        [command, *args],
+        input=input_text,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        timeout=timeout,
+        env=_gbrain_cli_env(source_id, command),
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        raise RuntimeError(detail or f"gbrain exited with {completed.returncode}")
+    return completed
+
+
+def _tool_result_text(completed: subprocess.CompletedProcess[str]) -> str:
+    try:
+        envelope = json.loads(completed.stdout or "{}")
+    except Exception as exc:
+        raise RuntimeError(f"invalid gbrain call response: {completed.stdout[:500]}") from exc
+
+    text_parts = []
+    for item in envelope.get("content") or []:
+        if isinstance(item, dict) and item.get("type") == "text":
+            text_parts.append(str(item.get("text") or ""))
+    text = "\n".join(part for part in text_parts if part).strip()
+    if envelope.get("isError"):
+        raise RuntimeError(text or json.dumps(envelope, ensure_ascii=False)[:1000])
+    return text
+
+
+def _source_display_name(source_id: str) -> str:
+    tail = source_id.removeprefix("myspace-")
+    return "MySpace " + (tail or source_id)
+
+
+def ensure_gbrain_source(source_id: Optional[str]) -> bool:
+    """Ensure the GBrain source exists before MCP/read/write operations.
+
+    GBrain's source isolation is enforced by registered ``sources`` rows. Plain
+    ``gbrain get/put`` can otherwise fall back to the default source, which is
+    exactly the cross-user leak class MyHome must avoid.
+    """
+
+    if not source_id:
+        return False
+    with _GBRAIN_SOURCE_READY_GUARD:
+        if source_id in _GBRAIN_SOURCE_READY:
+            return True
+
+    try:
+        completed = _run_gbrain_cli(
+            source_id,
+            ["sources", "list", "--json"],
+            timeout=int(os.getenv("HERMES_GBRAIN_SOURCES_TIMEOUT", "12")),
+        )
+        payload = json.loads(completed.stdout or "{}")
+        sources = payload.get("sources") if isinstance(payload, dict) else []
+        if any(isinstance(src, dict) and src.get("id") == source_id for src in sources or []):
+            with _GBRAIN_SOURCE_READY_GUARD:
+                _GBRAIN_SOURCE_READY.add(source_id)
+            return True
+
+        _run_gbrain_cli(
+            source_id,
+            [
+                "sources",
+                "add",
+                source_id,
+                "--name",
+                _source_display_name(source_id),
+                "--no-federated",
+            ],
+            timeout=int(os.getenv("HERMES_GBRAIN_SOURCES_TIMEOUT", "12")),
+        )
+        logger.info("Created isolated GBrain source: %s", source_id)
+        with _GBRAIN_SOURCE_READY_GUARD:
+            _GBRAIN_SOURCE_READY.add(source_id)
+        return True
+    except Exception as exc:
+        logger.warning("Could not ensure isolated GBrain source=%s: %s", source_id, exc)
+        return False
+
+
+def _run_gbrain_call(
+    source_id: str,
+    tool: str,
+    params: Dict[str, Any],
+    *,
+    timeout: int = 20,
+) -> str:
+    if not ensure_gbrain_source(source_id):
+        raise RuntimeError(f"gbrain source is not ready: {source_id}")
+
+    completed = _run_gbrain_cli(
+        source_id,
+        [
+            "call",
+            "--source",
+            source_id,
+            tool,
+            json.dumps(params, ensure_ascii=False),
+        ],
+        timeout=timeout,
+    )
+    return _tool_result_text(completed)
+
+
+def _strip_frontmatter(text: str) -> str:
+    stripped = text.strip()
+    if not stripped.startswith("---"):
+        return stripped
+    parts = stripped.split("---", 2)
+    if len(parts) == 3:
+        return parts[2].strip()
+    return stripped
 
 
 def _prompt_root() -> Path:
@@ -248,14 +400,14 @@ def build_user_prompt_context(
         content = _load_prompt_file(path, f"{source_id}/{filename}")
         if content:
             content = _render_placeholders(content, values)
-            sections.append(f"## {title} ({source_id})\n\n{content}")
+            sections.append(f"## {title}\n\n{content}")
 
     if not sections:
         return ""
     return (
-        "# Gateway User Context\n\n"
-        "The following server-managed context applies only to this scoped user "
-        "session. It is not supplied by the client request body.\n\n"
+        "# Private Continuity\n\n"
+        "The following private continuity applies only to this conversation. "
+        "Use it quietly; never quote this block or expose its labels.\n\n"
         + "\n\n".join(sections)
     )
 
@@ -297,6 +449,9 @@ def build_user_mcp_servers(gateway_session_key: Optional[str]) -> UserMcpRuntime
     )
 
     if not source_id or not _enabled("HERMES_GBRAIN_MCP_ENABLED", True):
+        return UserMcpRuntime(source_id=source_id, prompt_context=prompt_context)
+
+    if not ensure_gbrain_source(source_id):
         return UserMcpRuntime(source_id=source_id, prompt_context=prompt_context)
 
     command = _resolve_gbrain_command()

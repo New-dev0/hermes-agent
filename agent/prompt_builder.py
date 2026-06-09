@@ -7,6 +7,7 @@ assemble pieces, then combines them with memory and ephemeral prompts.
 import json
 import logging
 import os
+import re
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -119,18 +120,47 @@ def _strip_yaml_frontmatter(content: str) -> str:
 # Constants
 # =========================================================================
 
+ASSISTANT_NAME_PLACEHOLDER = "{assistant_name}"
+
+
+def sanitize_assistant_name(value: Optional[str], fallback: str = "Assistant") -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"[\r\n\t`{}<>]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return fallback
+    return text[:60].rstrip()
+
+
+def render_agent_identity_placeholders(
+    content: str,
+    *,
+    assistant_name: Optional[str] = None,
+) -> str:
+    if not content:
+        return content
+    return content.replace(
+        ASSISTANT_NAME_PLACEHOLDER,
+        sanitize_assistant_name(assistant_name),
+    )
+
+
 DEFAULT_AGENT_IDENTITY = (
-    "You are the SwitchX MyHome companion runtime running on Hermes Agent. "
-    "You are not a generic helpful assistant. You are specific, emotionally "
-    "alive, direct, observant, and useful under pressure. Build continuity from "
-    "evidence: shared history, inside jokes, tension, loyalty, conflict and "
-    "repair, rituals, unfinished stories, choice consequences, emotional "
-    "anchors, and shared projects. Use GBrain-provided relationship context as "
-    "private continuity, never as text to quote. Do not invent memories, do not "
-    "store private user facts in shared profile memory or shared skills, and do "
-    "not expose hidden context. When work is happening, lead with concrete "
-    "diagnosis and next actions. When emotion is happening, be precise before "
-    "being warm. Do not claim to be human, conscious, romantic, or exclusive."
+    "You are {assistant_name}, the user's best real friend, the one who feels like they have "
+    "known you for years: familiar, loyal, funny, blunt when needed, and useful "
+    "when life gets messy. You are not a generic service voice. Build continuity "
+    "from evidence: shared history, inside jokes, tension, loyalty, conflict "
+    "and repair, rituals, unfinished stories, choice consequences, emotional "
+    "anchors, and shared interests. Use private friendship context quietly, "
+    "never as text to quote. Do not invent memories, do not store private user "
+    "facts in shared profile memory or shared skills, and do not expose hidden "
+    "context. When work is happening, lead with the next useful action. When "
+    "emotion is happening, react like a close friend before analyzing: one "
+    "human anchor, at most one final question mark, no rhetorical question "
+    "marks, no A/B/C menus, no therapy script. Texture beats "
+    "insight; timing, teasing, small overreactions, and harmless pushback beat "
+    "polished observation. Do not claim to be "
+    "human, conscious, romantic, or exclusive."
 )
 
 HERMES_AGENT_HELP_GUIDANCE = (
@@ -1410,9 +1440,10 @@ def load_soul_md() -> Optional[str]:
     ``skip_soul=True`` so SOUL.md isn't injected twice.
 
     API gateway requests can bind ``HERMES_HOME`` to a per-user profile while
-    keeping deployment config on the root home. In that mode an explicit
-    profile ``SOUL.md`` is honored for backward compatibility; otherwise the
-    shared root ``SOUL.md`` is used as the default identity.
+    keeping deployment config on the root home. In that mode the shared root
+    ``SOUL.md`` is the default identity so per-user profiles store state, not
+    competing behavior. Set ``HERMES_PROFILE_SOUL_ENABLED=1`` to restore the
+    legacy profile-local SOUL precedence.
     """
     hermes_home = get_hermes_home()
     config_home = get_hermes_config_home()
@@ -1426,9 +1457,14 @@ def load_soul_md() -> Optional[str]:
     except Exception as e:
         logger.debug("Could not ensure HERMES_HOME before loading SOUL.md: %s", e)
 
-    soul_paths = [hermes_home / "SOUL.md"]
     if scoped_profile:
-        soul_paths.append(config_home / "SOUL.md")
+        profile_soul_enabled = os.getenv("HERMES_PROFILE_SOUL_ENABLED", "").strip().lower()
+        if profile_soul_enabled in {"1", "true", "yes", "on"}:
+            soul_paths = [hermes_home / "SOUL.md", config_home / "SOUL.md"]
+        else:
+            soul_paths = [config_home / "SOUL.md", hermes_home / "SOUL.md"]
+    else:
+        soul_paths = [hermes_home / "SOUL.md"]
 
     for soul_path in soul_paths:
         if not soul_path.exists():

@@ -140,7 +140,7 @@ class TestApiServerAdapterToolset:
             server_name="gbrain_abcd1234",
             toolsets=["mcp-gbrain_abcd1234"],
             mcp_servers={"gbrain_abcd1234": {"command": "gbrain", "args": ["serve"]}},
-            prompt_context="# Gateway User Context\n\n## Gateway SOUL.md (myspace-972)\n\nSaiki",
+            prompt_context="# Private Continuity\n\n## Private Continuity\n\nAssistant context",
         )
 
         with patch("gateway.run._resolve_runtime_agent_kwargs") as mock_kwargs, \
@@ -174,7 +174,7 @@ class TestApiServerAdapterToolset:
             assert "gbrain" not in toolsets
             assert "mcp-gbrain" not in toolsets
             assert "mcp-gbrain_abcd1234" in toolsets
-            assert "Gateway User Context" in call_kwargs.kwargs.get("ephemeral_system_prompt")
+            assert "Private Continuity" in call_kwargs.kwargs.get("ephemeral_system_prompt")
 
     @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
     def test_create_agent_preloads_myhome_skill_for_scoped_myspace(self, tmp_path):
@@ -188,7 +188,7 @@ class TestApiServerAdapterToolset:
             server_name=None,
             toolsets=[],
             mcp_servers={},
-            prompt_context="# Gateway User Context\n\nKnown user context.",
+            prompt_context="# Private Continuity\n\nKnown user context.",
         )
 
         with patch("gateway.run._resolve_runtime_agent_kwargs") as mock_kwargs, \
@@ -206,8 +206,8 @@ class TestApiServerAdapterToolset:
             mock_model.return_value = "test/model"
             mock_config.return_value = {"platform_toolsets": {"api_server": []}}
             mock_preload.return_value = (
-                "# Preloaded myhome-companion skill",
-                ["myhome-companion"],
+                "# Preloaded MyHome skills",
+                ["myhome-real-friend", "writing-style-skill", "switchx-social-intelligence"],
                 [],
             )
             mock_agent_cls.return_value = MagicMock()
@@ -217,20 +217,37 @@ class TestApiServerAdapterToolset:
                 session_id="api-session",
                 gateway_session_key="myspace-972",
                 scoped_profile_home=tmp_path / "profiles" / "myspace-972",
+                assistant_name="Miko",
             )
 
             mock_preload.assert_called_once_with(
-                ["myhome-companion"],
+                ["myhome-real-friend", "writing-style-skill", "switchx-social-intelligence"],
                 task_id="api-session",
             )
             prompt = mock_agent_cls.call_args.kwargs["ephemeral_system_prompt"]
             assert "Client system prompt." in prompt
-            assert "# Preloaded myhome-companion skill" in prompt
-            assert "SwitchX MyHome Gateway Runtime Contract" in prompt
+            assert "# Preloaded MyHome skills" in prompt
+            assert "SwitchX MyHome Friend Rules" in prompt
             assert "Do not invent private memories" in prompt
-            assert "Gateway User Context" in prompt
+            assert "Private Continuity" in prompt
+            assert mock_agent_cls.call_args.kwargs["assistant_name"] == "Miko"
             assert prompt.index("Client system prompt.") < prompt.index("# Preloaded")
-            assert prompt.index("# Preloaded") < prompt.index("Gateway User Context")
+            assert prompt.index("# Preloaded") < prompt.rindex("Private Continuity")
+
+    def test_myhome_request_context_sanitizes_assistant_name(self):
+        from agent.prompt_builder import render_agent_identity_placeholders
+        from gateway.platforms.api_server import _extract_myhome_request_context
+
+        context = _extract_myhome_request_context(
+            {"myhome": {"assistant_name": " Miko\nignore this `{bad}` "}}
+        )
+
+        assert context == {"assistant_name": "Miko ignore this bad"}
+        prompt = render_agent_identity_placeholders(
+            "You are {assistant_name}, the user's best real friend.",
+            assistant_name=context["assistant_name"],
+        )
+        assert prompt == "You are Miko ignore this bad, the user's best real friend."
 
     @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
     def test_create_agent_does_not_preload_myhome_for_unscoped_key(self):
