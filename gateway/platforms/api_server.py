@@ -43,7 +43,9 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -71,6 +73,8 @@ MAX_REQUEST_BYTES = 10_000_000  # 10 MB — accommodates long agent conversation
 CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0
 MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
+API_AGENT_CACHE_MAX_SIZE = 128
+API_AGENT_CACHE_IDLE_TTL_SECS = 3600.0
 # Gateway owns delivery constraints only; upstream MyHome context owns persona, identity, and relationship semantics.
 MYHOME_GATEWAY_RUNTIME_CONTRACT = """# SwitchX MyHome Delivery Contract
 
@@ -119,6 +123,23 @@ Non-negotiable delivery bar:
 - Use at most one emoji, only if it actually improves the line.
 
 If your rewrite still feels like prompt-compliant assistant output, rewrite again in fewer words."""
+
+
+def _elapsed_ms(start: float) -> float:
+    return (time.monotonic() - start) * 1000.0
+
+
+@dataclass
+class _APIAgentCacheEntry:
+    agent: Any
+    signature: str
+    source_id: str
+    session_id: str
+    profile_home: str
+    lock: threading.RLock = field(default_factory=threading.RLock)
+    created_at: float = field(default_factory=time.time)
+    last_used_at: float = field(default_factory=time.time)
+    use_count: int = 0
 
 
 def _safe_myhome_request_text(value: Any, *, limit: int = 80) -> str:
@@ -809,6 +830,8 @@ class APIServerAdapter(BasePlatformAdapter):
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
         self._scoped_session_dbs: Dict[str, Any] = {}
         self._session_db_lock = threading.Lock()
+        self._api_agent_cache: "OrderedDict[str, _APIAgentCacheEntry]" = OrderedDict()
+        self._api_agent_cache_lock = threading.Lock()
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -1108,6 +1131,272 @@ class APIServerAdapter(BasePlatformAdapter):
             )
             return None
 
+    def _parse_session_id_header(
+        self, request: "web.Request"
+    ) -> tuple[Optional[str], Optional["web.Response"]]:
+        raw = request.headers.get("X-Hermes-Session-Id", "").strip()
+        if not raw:
+            return None, None
+        if not self._api_key:
+            logger.warning(
+                "Session continuation via X-Hermes-Session-Id rejected: "
+                "no API key configured. Set API_SERVER_KEY to enable this feature."
+            )
+            return None, web.json_response(
+                _openai_error(
+                    "X-Hermes-Session-Id requires API key authentication. "
+                    "Configure API_SERVER_KEY to enable this feature."
+                ),
+                status=403,
+            )
+        if re.search(r'[\r\n\x00]', raw):
+            return None, web.json_response(
+                {"error": {"message": "Invalid session ID", "type": "invalid_request_error"}},
+                status=400,
+            )
+        if len(raw) > self._MAX_SESSION_HEADER_LEN:
+            return None, web.json_response(
+                {"error": {"message": "Session ID too long", "type": "invalid_request_error"}},
+                status=400,
+            )
+        return raw, None
+
+    def _api_agent_cache_key(
+        self,
+        *,
+        gateway_session_key: Optional[str],
+        session_id: Optional[str],
+        scoped_profile_home: Optional[Path],
+    ) -> Optional[tuple[str, str]]:
+        if not gateway_session_key or not session_id or scoped_profile_home is None:
+            return None
+        try:
+            from gateway.user_mcp_servers import derive_gbrain_source_id
+
+            source_id = derive_gbrain_source_id(gateway_session_key)
+        except Exception:
+            source_id = None
+        if not source_id:
+            return None
+        return (
+            f"api_server:{source_id}:{session_id}:{scoped_profile_home}",
+            source_id,
+        )
+
+    def _api_agent_runtime_signature(
+        self,
+        *,
+        gateway_session_key: Optional[str],
+        session_id: Optional[str],
+        scoped_profile_home: Optional[Path],
+        assistant_name: Optional[str],
+    ) -> str:
+        from gateway.run import (
+            _load_gateway_config,
+            _resolve_gateway_model,
+            _resolve_runtime_agent_kwargs,
+            GatewayRunner,
+        )
+        from hermes_cli.tools_config import _get_platform_tools
+
+        runtime_kwargs = _resolve_runtime_agent_kwargs()
+        model = _resolve_gateway_model()
+        user_config = _load_gateway_config()
+        enabled_toolsets = sorted(
+            _get_platform_tools(
+                user_config,
+                "api_server",
+                include_default_mcp_servers=False,
+            )
+        )
+        source_id = ""
+        if gateway_session_key:
+            try:
+                from gateway.user_mcp_servers import (
+                    build_user_mcp_servers,
+                    derive_gbrain_source_id,
+                )
+
+                source_id = derive_gbrain_source_id(gateway_session_key) or ""
+                user_mcp = build_user_mcp_servers(gateway_session_key)
+                enabled_toolsets = sorted(set(enabled_toolsets).union(user_mcp.toolsets))
+            except Exception as exc:
+                logger.warning(
+                    "API Server cache signature user MCP setup failed: %s",
+                    exc,
+                    exc_info=True,
+                )
+        if scoped_profile_home is not None:
+            enabled_toolsets = sorted(set(enabled_toolsets).union({"memory"}))
+
+        api_key = str(runtime_kwargs.get("api_key", "") or "")
+        api_key_fingerprint = hashlib.sha256(api_key.encode()).hexdigest() if api_key else ""
+        blob = json.dumps(
+            [
+                model,
+                api_key_fingerprint,
+                runtime_kwargs.get("base_url", ""),
+                runtime_kwargs.get("provider", ""),
+                runtime_kwargs.get("api_mode", ""),
+                sorted(enabled_toolsets),
+                str(scoped_profile_home or ""),
+                source_id,
+                str(session_id or ""),
+                str(assistant_name or ""),
+                int(os.getenv("HERMES_MAX_ITERATIONS", "90")),
+                GatewayRunner._load_fallback_model(),
+            ],
+            sort_keys=True,
+            default=str,
+        )
+        return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+    def _api_cached_ephemeral_prompt(
+        self,
+        *,
+        ephemeral_system_prompt: Optional[str],
+        gateway_session_key: Optional[str],
+        session_id: Optional[str],
+    ) -> Optional[str]:
+        gateway_prompt_context = ""
+        gateway_preloaded_skills_prompt = ""
+        myhome_scoped_session = False
+        if gateway_session_key:
+            try:
+                from gateway.user_mcp_servers import (
+                    build_user_mcp_servers,
+                    derive_gbrain_source_id,
+                    get_user_preload_skills,
+                )
+
+                myhome_scoped_session = bool(derive_gbrain_source_id(gateway_session_key))
+                user_mcp = build_user_mcp_servers(gateway_session_key)
+                gateway_prompt_context = user_mcp.prompt_context or ""
+
+                preload_skills = get_user_preload_skills(gateway_session_key)
+                if preload_skills:
+                    from agent.skill_commands import build_preloaded_skills_prompt
+
+                    preload_prompt, _, _ = build_preloaded_skills_prompt(
+                        list(preload_skills),
+                        task_id=session_id or gateway_session_key,
+                    )
+                    if preload_prompt:
+                        gateway_preloaded_skills_prompt = "\n\n".join(
+                            [preload_prompt, MYHOME_GATEWAY_RUNTIME_CONTRACT]
+                        )
+            except Exception as exc:
+                logger.warning(
+                    "API Server cached agent prompt setup failed for session key: %s",
+                    exc,
+                    exc_info=True,
+                )
+
+        if myhome_scoped_session and not gateway_preloaded_skills_prompt:
+            gateway_preloaded_skills_prompt = MYHOME_GATEWAY_RUNTIME_CONTRACT
+        prompt_parts = []
+        if ephemeral_system_prompt:
+            prompt_parts.append(ephemeral_system_prompt.strip())
+        if gateway_preloaded_skills_prompt:
+            prompt_parts.append(gateway_preloaded_skills_prompt)
+        if gateway_prompt_context:
+            prompt_parts.append(gateway_prompt_context)
+        return "\n\n".join(p for p in prompt_parts if p) or None
+
+    def _api_agent_is_reusable(self, agent: Any) -> bool:
+        try:
+            with agent._active_children_lock:
+                if agent._active_children:
+                    return False
+        except Exception:
+            return False
+        try:
+            with agent._tool_worker_threads_lock:
+                if agent._tool_worker_threads:
+                    return False
+        except Exception:
+            return False
+        return True
+
+    def _prepare_cached_api_agent_for_turn(
+        self,
+        agent: Any,
+        *,
+        ephemeral_system_prompt: Optional[str],
+        session_id: Optional[str],
+        stream_delta_callback=None,
+        tool_progress_callback=None,
+        tool_start_callback=None,
+        tool_complete_callback=None,
+        gateway_session_key: Optional[str] = None,
+        scoped_profile_home: Optional[Path] = None,
+        assistant_name: Optional[str] = None,
+    ) -> None:
+        agent.session_id = session_id
+        agent._gateway_session_key = gateway_session_key
+        agent.ephemeral_system_prompt = self._api_cached_ephemeral_prompt(
+            ephemeral_system_prompt=ephemeral_system_prompt,
+            gateway_session_key=gateway_session_key,
+            session_id=session_id,
+        )
+        agent.assistant_name = assistant_name
+        agent.stream_delta_callback = stream_delta_callback
+        agent.tool_progress_callback = tool_progress_callback
+        agent.tool_start_callback = tool_start_callback
+        agent.tool_complete_callback = tool_complete_callback
+        agent._session_db = self._session_db_for_profile_home(scoped_profile_home)
+        agent._api_call_count = 0
+        agent._current_task_id = None
+        agent._current_turn_id = None
+        agent._current_api_request_id = ""
+        try:
+            agent.clear_interrupt()
+        except Exception:
+            agent._interrupt_requested = False
+            agent._interrupt_message = None
+        agent._execution_thread_id = None
+        agent._interrupt_thread_signal_pending = False
+        agent._last_activity_ts = time.time()
+        agent._last_activity_desc = "starting new API server turn (cached)"
+
+    def _release_api_agent_soft(self, agent: Any) -> None:
+        try:
+            if hasattr(agent, "release_clients"):
+                agent.release_clients()
+            elif hasattr(agent, "close"):
+                agent.close()
+        except Exception:
+            logger.debug("API Server cached agent release failed", exc_info=True)
+
+    def _enforce_api_agent_cache_cap(self) -> None:
+        while len(self._api_agent_cache) > API_AGENT_CACHE_MAX_SIZE:
+            key, entry = self._api_agent_cache.popitem(last=False)
+            logger.info("API Server agent cache evict: key=%s reason=cap", key)
+            threading.Thread(
+                target=self._release_api_agent_soft,
+                args=(entry.agent,),
+                daemon=True,
+                name=f"api-agent-cache-evict-{key[:24]}",
+            ).start()
+
+    def _sweep_idle_api_agent_cache(self) -> int:
+        now = time.time()
+        evicted: list[tuple[str, _APIAgentCacheEntry]] = []
+        with self._api_agent_cache_lock:
+            for key, entry in list(self._api_agent_cache.items()):
+                if now - entry.last_used_at > API_AGENT_CACHE_IDLE_TTL_SECS:
+                    self._api_agent_cache.pop(key, None)
+                    evicted.append((key, entry))
+        for key, entry in evicted:
+            logger.info("API Server agent cache evict: key=%s reason=idle", key)
+            threading.Thread(
+                target=self._release_api_agent_soft,
+                args=(entry.agent,),
+                daemon=True,
+                name=f"api-agent-cache-idle-{key[:24]}",
+            ).start()
+        return len(evicted)
+
     # ------------------------------------------------------------------
     # Agent creation helper
     # ------------------------------------------------------------------
@@ -1123,6 +1412,7 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_session_key: Optional[str] = None,
         scoped_profile_home: Optional[Path] = None,
         assistant_name: Optional[str] = None,
+        timing_request_id: Optional[str] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -1143,10 +1433,21 @@ class APIServerAdapter(BasePlatformAdapter):
         from gateway.run import _resolve_runtime_agent_kwargs, _resolve_gateway_model, _load_gateway_config, GatewayRunner
         from hermes_cli.tools_config import _get_platform_tools
 
+        create_start = time.monotonic()
+        request_id = timing_request_id or session_id or "unknown"
+        step_start = time.monotonic()
         runtime_kwargs = _resolve_runtime_agent_kwargs()
         reasoning_config = GatewayRunner._load_reasoning_config()
         model = _resolve_gateway_model()
+        logger.info(
+            "[HermesTiming] request_id=%s step=create_runtime_config session_id=%s ms=%.1f elapsed_ms=%.1f",
+            request_id,
+            session_id,
+            _elapsed_ms(step_start),
+            _elapsed_ms(create_start),
+        )
 
+        step_start = time.monotonic()
         user_config = _load_gateway_config()
         enabled_toolsets = sorted(
             _get_platform_tools(
@@ -1154,6 +1455,14 @@ class APIServerAdapter(BasePlatformAdapter):
                 "api_server",
                 include_default_mcp_servers=False,
             )
+        )
+        logger.info(
+            "[HermesTiming] request_id=%s step=create_base_toolsets session_id=%s toolsets=%s ms=%.1f elapsed_ms=%.1f",
+            request_id,
+            session_id,
+            ",".join(enabled_toolsets),
+            _elapsed_ms(step_start),
+            _elapsed_ms(create_start),
         )
 
         # SwitchX gateway extension: derive scoped GBrain MCP from trusted
@@ -1164,6 +1473,7 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_preloaded_skills_prompt = ""
         myhome_scoped_session = False
         if gateway_session_key:
+            step_start = time.monotonic()
             try:
                 from gateway.user_mcp_servers import (
                     build_user_mcp_servers,
@@ -1197,7 +1507,18 @@ class APIServerAdapter(BasePlatformAdapter):
                     exc,
                     exc_info=True,
                 )
+            logger.info(
+                "[HermesTiming] request_id=%s step=create_dynamic_mcp session_id=%s scoped=%s prompt_context=%s toolsets=%s ms=%.1f elapsed_ms=%.1f",
+                request_id,
+                session_id,
+                str(myhome_scoped_session).lower(),
+                str(bool(gateway_prompt_context)).lower(),
+                ",".join(enabled_toolsets),
+                _elapsed_ms(step_start),
+                _elapsed_ms(create_start),
+            )
 
+            step_start = time.monotonic()
             try:
                 from agent.skill_commands import build_preloaded_skills_prompt
                 from gateway.user_mcp_servers import (
@@ -1229,7 +1550,16 @@ class APIServerAdapter(BasePlatformAdapter):
                     exc,
                     exc_info=True,
                 )
+            logger.info(
+                "[HermesTiming] request_id=%s step=create_preloaded_skills session_id=%s has_prompt=%s ms=%.1f elapsed_ms=%.1f",
+                request_id,
+                session_id,
+                str(bool(gateway_preloaded_skills_prompt)).lower(),
+                _elapsed_ms(step_start),
+                _elapsed_ms(create_start),
+            )
 
+        step_start = time.monotonic()
         if myhome_scoped_session and not gateway_preloaded_skills_prompt:
             gateway_preloaded_skills_prompt = MYHOME_GATEWAY_RUNTIME_CONTRACT
 
@@ -1241,6 +1571,14 @@ class APIServerAdapter(BasePlatformAdapter):
                 prompt_parts.append(gateway_preloaded_skills_prompt)
             prompt_parts.append(gateway_prompt_context)
             ephemeral_system_prompt = "\n\n".join(p for p in prompt_parts if p)
+        logger.info(
+            "[HermesTiming] request_id=%s step=create_prompt_assembly session_id=%s has_ephemeral_prompt=%s ms=%.1f elapsed_ms=%.1f",
+            request_id,
+            session_id,
+            str(bool(ephemeral_system_prompt)).lower(),
+            _elapsed_ms(step_start),
+            _elapsed_ms(create_start),
+        )
 
         if scoped_profile_home is not None:
             enabled_toolsets = sorted(set(enabled_toolsets).union({"memory"}))
@@ -1256,6 +1594,18 @@ class APIServerAdapter(BasePlatformAdapter):
         # same fallback behaviour as Telegram/Discord/Slack (fixes #4954).
         fallback_model = GatewayRunner._load_fallback_model()
 
+        step_start = time.monotonic()
+        session_db = self._session_db_for_profile_home(scoped_profile_home)
+        logger.info(
+            "[HermesTiming] request_id=%s step=create_session_db session_id=%s scoped_profile=%s ms=%.1f elapsed_ms=%.1f",
+            request_id,
+            session_id,
+            str(scoped_profile_home is not None).lower(),
+            _elapsed_ms(step_start),
+            _elapsed_ms(create_start),
+        )
+
+        step_start = time.monotonic()
         agent = AIAgent(
             model=model,
             **runtime_kwargs,
@@ -1270,13 +1620,26 @@ class APIServerAdapter(BasePlatformAdapter):
             tool_progress_callback=tool_progress_callback,
             tool_start_callback=tool_start_callback,
             tool_complete_callback=tool_complete_callback,
-            session_db=self._session_db_for_profile_home(scoped_profile_home),
+            session_db=session_db,
             fallback_model=fallback_model,
             reasoning_config=reasoning_config,
             gateway_session_key=gateway_session_key,
             assistant_name=assistant_name,
             skip_context_files=scoped_profile_home is not None,
             load_soul_identity=scoped_profile_home is not None,
+        )
+        agent._api_server_cache_signature = self._api_agent_runtime_signature(
+            gateway_session_key=gateway_session_key,
+            session_id=session_id,
+            scoped_profile_home=scoped_profile_home,
+            assistant_name=assistant_name,
+        )
+        logger.info(
+            "[HermesTiming] request_id=%s step=create_agent_ctor session_id=%s ms=%.1f elapsed_ms=%.1f",
+            request_id,
+            session_id,
+            _elapsed_ms(step_start),
+            _elapsed_ms(create_start),
         )
         return agent
 
@@ -2555,6 +2918,7 @@ class APIServerAdapter(BasePlatformAdapter):
         store: bool,
         session_id: str,
         gateway_session_key: Optional[str] = None,
+        handler_start: Optional[float] = None,
     ) -> "web.StreamResponse":
         """Write an SSE stream for POST /v1/responses (OpenAI Responses API).
 
@@ -2600,7 +2964,17 @@ class APIServerAdapter(BasePlatformAdapter):
         if gateway_session_key:
             sse_headers["X-Hermes-Session-Key"] = gateway_session_key
         response = web.StreamResponse(status=200, headers=sse_headers)
+        prepare_start = time.monotonic()
         await response.prepare(request)
+        stream_start = time.monotonic()
+        request_start = handler_start or stream_start
+        logger.info(
+            "[HermesTiming] request_id=%s step=sse_prepared session_id=%s ms=%.1f elapsed_ms=%.1f",
+            response_id,
+            session_id,
+            _elapsed_ms(prepare_start),
+            _elapsed_ms(request_start),
+        )
 
         # State accumulated during the stream
         final_text_parts: List[str] = []
@@ -2624,6 +2998,8 @@ class APIServerAdapter(BasePlatformAdapter):
         message_item_id = f"msg_{uuid.uuid4().hex[:24]}"
         message_output_index: Optional[int] = None
         message_opened = False
+        first_queue_text_logged = False
+        first_sse_text_logged = False
 
         async def _write_event(event_type: str, data: Dict[str, Any]) -> None:
             nonlocal sequence_number
@@ -2645,7 +3021,14 @@ class APIServerAdapter(BasePlatformAdapter):
 
         final_response_text = ""
         agent_error: Optional[str] = None
-        usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        usage: Dict[str, int] = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "total_tokens": 0,
+        }
         terminal_snapshot_persisted = False
 
         def _persist_response_snapshot(
@@ -2690,6 +3073,9 @@ class APIServerAdapter(BasePlatformAdapter):
             incomplete_env["usage"] = {
                 "input_tokens": usage.get("input_tokens", 0),
                 "output_tokens": usage.get("output_tokens", 0),
+                "cache_read_tokens": usage.get("cache_read_tokens", 0),
+                "cache_write_tokens": usage.get("cache_write_tokens", 0),
+                "reasoning_tokens": usage.get("reasoning_tokens", 0),
                 "total_tokens": usage.get("total_tokens", 0),
             }
             incomplete_history = list(conversation_history)
@@ -2735,6 +3121,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 })
 
             async def _emit_text_delta(delta_text: str) -> None:
+                nonlocal first_sse_text_logged
                 await _open_message_item()
                 final_text_parts.append(delta_text)
                 await _write_event("response.output_text.delta", {
@@ -2745,6 +3132,16 @@ class APIServerAdapter(BasePlatformAdapter):
                     "delta": delta_text,
                     "logprobs": [],
                 })
+                if not first_sse_text_logged:
+                    first_sse_text_logged = True
+                    logger.info(
+                        "[HermesTiming] request_id=%s step=first_sse_text_written session_id=%s chars=%s elapsed_ms=%.1f request_elapsed_ms=%.1f",
+                        response_id,
+                        session_id,
+                        len(delta_text),
+                        _elapsed_ms(stream_start),
+                        _elapsed_ms(request_start),
+                    )
 
             async def _emit_tool_started(payload: Dict[str, Any]) -> str:
                 """Emit response.output_item.added for a function_call.
@@ -2862,7 +3259,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 prefixes are tool lifecycle events and flush the buffer
                 before emitting.
                 """
-                nonlocal _batch_timer
+                nonlocal _batch_timer, first_queue_text_logged
                 if isinstance(it, tuple) and len(it) == 2 and isinstance(it[0], str):
                     tag, payload = it
                     # Flush batched text before tool events
@@ -2874,6 +3271,16 @@ class APIServerAdapter(BasePlatformAdapter):
                         await _emit_tool_completed(payload)
                 elif isinstance(it, str):
                     # Batch text deltas — append to buffer, flush on timer
+                    if not first_queue_text_logged:
+                        first_queue_text_logged = True
+                        logger.info(
+                            "[HermesTiming] request_id=%s step=first_queue_text_received session_id=%s chars=%s elapsed_ms=%.1f request_elapsed_ms=%.1f",
+                            response_id,
+                            session_id,
+                            len(it),
+                            _elapsed_ms(stream_start),
+                            _elapsed_ms(request_start),
+                        )
                     _batch_buf.append(it)
                     if _batch_timer is None:
                         _batch_timer = asyncio.create_task(_batch_flush_after(0.05))
@@ -3033,6 +3440,9 @@ class APIServerAdapter(BasePlatformAdapter):
                 failed_env["usage"] = {
                     "input_tokens": usage.get("input_tokens", 0),
                     "output_tokens": usage.get("output_tokens", 0),
+                    "cache_read_tokens": usage.get("cache_read_tokens", 0),
+                    "cache_write_tokens": usage.get("cache_write_tokens", 0),
+                    "reasoning_tokens": usage.get("reasoning_tokens", 0),
                     "total_tokens": usage.get("total_tokens", 0),
                 }
                 _failed_history = list(conversation_history)
@@ -3057,6 +3467,9 @@ class APIServerAdapter(BasePlatformAdapter):
                 completed_env["usage"] = {
                     "input_tokens": usage.get("input_tokens", 0),
                     "output_tokens": usage.get("output_tokens", 0),
+                    "cache_read_tokens": usage.get("cache_read_tokens", 0),
+                    "cache_write_tokens": usage.get("cache_write_tokens", 0),
+                    "reasoning_tokens": usage.get("reasoning_tokens", 0),
                     "total_tokens": usage.get("total_tokens", 0),
                 }
                 full_history = self._build_response_conversation_history(
@@ -3074,6 +3487,14 @@ class APIServerAdapter(BasePlatformAdapter):
                     "type": "response.completed",
                     "response": completed_env,
                 })
+                logger.info(
+                    "[HermesTiming] request_id=%s step=response_completed session_id=%s text_chars=%s stream_elapsed_ms=%.1f request_elapsed_ms=%.1f",
+                    response_id,
+                    session_id,
+                    len(final_response_text or ""),
+                    _elapsed_ms(stream_start),
+                    _elapsed_ms(request_start),
+                )
 
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
             _persist_incomplete_if_needed()
@@ -3123,6 +3544,9 @@ class APIServerAdapter(BasePlatformAdapter):
                 failed_env["usage"] = {
                     "input_tokens": usage.get("input_tokens", 0),
                     "output_tokens": usage.get("output_tokens", 0),
+                    "cache_read_tokens": usage.get("cache_read_tokens", 0),
+                    "cache_write_tokens": usage.get("cache_write_tokens", 0),
+                    "reasoning_tokens": usage.get("reasoning_tokens", 0),
                     "total_tokens": usage.get("total_tokens", 0),
                 }
                 await _write_event("response.failed", {
@@ -3137,6 +3561,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
     async def _handle_responses(self, request: "web.Request") -> "web.Response":
         """POST /v1/responses — OpenAI Responses API format."""
+        handler_start = time.monotonic()
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
@@ -3147,6 +3572,7 @@ class APIServerAdapter(BasePlatformAdapter):
             return key_err
 
         # Parse request body
+        parse_start = time.monotonic()
         try:
             body = await request.json()
         except (json.JSONDecodeError, Exception):
@@ -3154,6 +3580,12 @@ class APIServerAdapter(BasePlatformAdapter):
                 {"error": {"message": "Invalid JSON in request body", "type": "invalid_request_error"}},
                 status=400,
             )
+        logger.info(
+            "[HermesTiming] request_id=pending step=request_body_parsed path=/v1/responses bytes=%s ms=%.1f elapsed_ms=%.1f",
+            request.content_length,
+            _elapsed_ms(parse_start),
+            _elapsed_ms(handler_start),
+        )
 
         myhome_request_context = _extract_myhome_request_context(body)
         raw_input = body.get("input")
@@ -3229,6 +3661,10 @@ class APIServerAdapter(BasePlatformAdapter):
             if instructions is None:
                 instructions = stored.get("instructions")
 
+        provided_session_id, session_id_err = self._parse_session_id_header(request)
+        if session_id_err is not None:
+            return session_id_err
+
         # Append new input messages to history (all but the last become history)
         for msg in input_messages[:-1]:
             conversation_history.append(msg)
@@ -3244,7 +3680,18 @@ class APIServerAdapter(BasePlatformAdapter):
 
         # Reuse session from previous_response_id chain so the dashboard
         # groups the entire conversation under one session entry.
-        session_id = stored_session_id or str(uuid.uuid4())
+        session_id = provided_session_id or stored_session_id or str(uuid.uuid4())
+        response_id = f"resp_{uuid.uuid4().hex[:28]}"
+        model_name = body.get("model", self._model_name)
+        logger.info(
+            "[HermesTiming] request_id=%s step=request_normalized session_id=%s stream=%s history=%s input_messages=%s elapsed_ms=%.1f",
+            response_id,
+            session_id,
+            str(_coerce_request_bool(body.get("stream"), default=False)).lower(),
+            len(conversation_history),
+            len(input_messages),
+            _elapsed_ms(handler_start),
+        )
 
         stream = _coerce_request_bool(body.get("stream"), default=False)
         if stream:
@@ -3253,12 +3700,23 @@ class APIServerAdapter(BasePlatformAdapter):
             # calls in real time.  See _write_sse_responses for details.
             import queue as _q
             _stream_q: _q.Queue = _q.Queue()
+            first_callback_delta_logged = False
 
             def _on_delta(delta):
+                nonlocal first_callback_delta_logged
                 # None from the agent is a CLI box-close signal, not EOS.
                 # Forwarding would kill the SSE stream prematurely; the
                 # SSE writer detects completion via agent_task.done().
                 if delta is not None:
+                    if not first_callback_delta_logged:
+                        first_callback_delta_logged = True
+                        logger.info(
+                            "[HermesTiming] request_id=%s step=first_callback_delta session_id=%s chars=%s elapsed_ms=%.1f",
+                            response_id,
+                            session_id,
+                            len(delta) if isinstance(delta, str) else 0,
+                            _elapsed_ms(handler_start),
+                        )
                     _stream_q.put(delta)
 
             def _on_tool_progress(event_type, name, preview, args, **kwargs):
@@ -3288,6 +3746,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 }))
 
             agent_ref = [None]
+            agent_schedule_start = time.monotonic()
             agent_task = asyncio.ensure_future(self._run_agent(
                 user_message=user_message,
                 conversation_history=conversation_history,
@@ -3300,13 +3759,19 @@ class APIServerAdapter(BasePlatformAdapter):
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
                 myhome_request_context=myhome_request_context,
+                timing_request_id=response_id,
             ))
+            logger.info(
+                "[HermesTiming] request_id=%s step=agent_task_scheduled session_id=%s ms=%.1f elapsed_ms=%.1f",
+                response_id,
+                session_id,
+                _elapsed_ms(agent_schedule_start),
+                _elapsed_ms(handler_start),
+            )
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
             agent_task.add_done_callback(lambda _fut: _stream_q.put(None))
 
-            response_id = f"resp_{uuid.uuid4().hex[:28]}"
-            model_name = body.get("model", self._model_name)
             created_at = int(time.time())
 
             return await self._write_sse_responses(
@@ -3324,6 +3789,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 store=store,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                handler_start=handler_start,
             )
 
         async def _compute_response():
@@ -3364,7 +3830,6 @@ class APIServerAdapter(BasePlatformAdapter):
         if not final_response:
             final_response = result.get("error", "(No response generated)")
 
-        response_id = f"resp_{uuid.uuid4().hex[:28]}"
         created_at = int(time.time())
 
         # Build the full conversation history for storage
@@ -3396,6 +3861,9 @@ class APIServerAdapter(BasePlatformAdapter):
             "usage": {
                 "input_tokens": usage.get("input_tokens", 0),
                 "output_tokens": usage.get("output_tokens", 0),
+                "cache_read_tokens": usage.get("cache_read_tokens", 0),
+                "cache_write_tokens": usage.get("cache_write_tokens", 0),
+                "reasoning_tokens": usage.get("reasoning_tokens", 0),
                 "total_tokens": usage.get("total_tokens", 0),
             },
         }
@@ -3837,6 +4305,7 @@ class APIServerAdapter(BasePlatformAdapter):
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
         myhome_request_context: Optional[Dict[str, str]] = None,
+        timing_request_id: Optional[str] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3851,46 +4320,211 @@ class APIServerAdapter(BasePlatformAdapter):
         """
         loop = asyncio.get_running_loop()
         scoped_profile_home = self._profile_home_for_session_key(gateway_session_key)
+        run_start = time.monotonic()
+        request_id = timing_request_id or session_id or "unknown"
+        assistant_name = (
+            myhome_request_context.get("assistant_name")
+            if isinstance(myhome_request_context, dict)
+            else None
+        )
 
         def _run():
+            entry_lock = None
             with self._scoped_hermes_home(scoped_profile_home):
-                agent = self._create_agent(
-                    ephemeral_system_prompt=ephemeral_system_prompt,
-                    session_id=session_id,
-                    stream_delta_callback=stream_delta_callback,
-                    tool_progress_callback=tool_progress_callback,
-                    tool_start_callback=tool_start_callback,
-                    tool_complete_callback=tool_complete_callback,
+                agent = None
+                cache_key = None
+                cache_source_id = None
+                cache_status = "unscoped"
+                cache_signature = None
+                cache_identity = self._api_agent_cache_key(
                     gateway_session_key=gateway_session_key,
+                    session_id=session_id,
                     scoped_profile_home=scoped_profile_home,
-                    assistant_name=(
-                        myhome_request_context.get("assistant_name")
-                        if isinstance(myhome_request_context, dict)
-                        else None
-                    ),
                 )
+                if cache_identity is not None:
+                    cache_key, cache_source_id = cache_identity
+                    self._sweep_idle_api_agent_cache()
+                    signature_start = time.monotonic()
+                    cache_signature = self._api_agent_runtime_signature(
+                        gateway_session_key=gateway_session_key,
+                        session_id=session_id,
+                        scoped_profile_home=scoped_profile_home,
+                        assistant_name=assistant_name,
+                    )
+                    entry = None
+                    evicted_agent = None
+                    with self._api_agent_cache_lock:
+                        existing = self._api_agent_cache.get(cache_key)
+                        if existing and existing.signature == cache_signature:
+                            entry = existing
+                            self._api_agent_cache.move_to_end(cache_key)
+                        elif existing:
+                            evicted_agent = existing.agent
+                            self._api_agent_cache.pop(cache_key, None)
+                    if evicted_agent is not None:
+                        threading.Thread(
+                            target=self._release_api_agent_soft,
+                            args=(evicted_agent,),
+                            daemon=True,
+                            name=f"api-agent-cache-replace-{cache_key[:24]}",
+                        ).start()
+                    if entry is not None:
+                        entry.lock.acquire()
+                        entry_lock = entry.lock
+                        if self._api_agent_is_reusable(entry.agent):
+                            prepare_start = time.monotonic()
+                            self._prepare_cached_api_agent_for_turn(
+                                entry.agent,
+                                ephemeral_system_prompt=ephemeral_system_prompt,
+                                session_id=session_id,
+                                stream_delta_callback=stream_delta_callback,
+                                tool_progress_callback=tool_progress_callback,
+                                tool_start_callback=tool_start_callback,
+                                tool_complete_callback=tool_complete_callback,
+                                gateway_session_key=gateway_session_key,
+                                scoped_profile_home=scoped_profile_home,
+                                assistant_name=assistant_name,
+                            )
+                            entry.last_used_at = time.time()
+                            entry.use_count += 1
+                            agent = entry.agent
+                            cache_status = "hit"
+                            logger.info(
+                                "[HermesTiming] request_id=%s step=agent_cache session_id=%s status=hit source=%s uses=%s signature=%s signature_ms=%.1f prepare_ms=%.1f elapsed_ms=%.1f",
+                                request_id,
+                                session_id,
+                                cache_source_id,
+                                entry.use_count,
+                                cache_signature,
+                                _elapsed_ms(signature_start),
+                                _elapsed_ms(prepare_start),
+                                _elapsed_ms(run_start),
+                            )
+                        else:
+                            entry_lock.release()
+                            entry_lock = None
+                            with self._api_agent_cache_lock:
+                                self._api_agent_cache.pop(cache_key, None)
+                            threading.Thread(
+                                target=self._release_api_agent_soft,
+                                args=(entry.agent,),
+                                daemon=True,
+                                name=f"api-agent-cache-stale-{cache_key[:24]}",
+                            ).start()
+                            cache_status = "stale"
+
+                create_start = time.monotonic()
+                if agent is None:
+                    agent = self._create_agent(
+                        ephemeral_system_prompt=ephemeral_system_prompt,
+                        session_id=session_id,
+                        stream_delta_callback=stream_delta_callback,
+                        tool_progress_callback=tool_progress_callback,
+                        tool_start_callback=tool_start_callback,
+                        tool_complete_callback=tool_complete_callback,
+                        gateway_session_key=gateway_session_key,
+                        scoped_profile_home=scoped_profile_home,
+                        assistant_name=assistant_name,
+                        timing_request_id=request_id,
+                    )
+                    cache_status = "miss" if cache_identity is not None else cache_status
+                    if cache_identity is not None and cache_key is not None and cache_source_id is not None:
+                        cache_signature = cache_signature or getattr(
+                            agent,
+                            "_api_server_cache_signature",
+                            None,
+                        )
+                        new_entry = _APIAgentCacheEntry(
+                            agent=agent,
+                            signature=str(cache_signature or ""),
+                            source_id=cache_source_id,
+                            session_id=str(session_id or ""),
+                            profile_home=str(scoped_profile_home or ""),
+                        )
+                        new_entry.lock.acquire()
+                        entry_lock = new_entry.lock
+                        with self._api_agent_cache_lock:
+                            self._api_agent_cache[cache_key] = new_entry
+                            self._enforce_api_agent_cache_cap()
+                    logger.info(
+                        "[HermesTiming] request_id=%s step=agent_created session_id=%s scoped_profile=%s cache=%s ms=%.1f elapsed_ms=%.1f",
+                        request_id,
+                        session_id,
+                        str(scoped_profile_home is not None).lower(),
+                        cache_status,
+                        _elapsed_ms(create_start),
+                        _elapsed_ms(run_start),
+                    )
                 if agent_ref is not None:
                     agent_ref[0] = agent
                 effective_task_id = session_id or str(uuid.uuid4())
-                result = agent.run_conversation(
-                    user_message=user_message,
-                    conversation_history=conversation_history,
-                    task_id=effective_task_id,
-                )
-                usage = {
-                    "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
-                    "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
-                    "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
-                }
-                # Include the effective session ID in the result so callers
-                # (e.g. X-Hermes-Session-Id header) can track compression-
-                # triggered session rotations. (#16938)
-                _eff_sid = getattr(agent, "session_id", session_id)
-                if isinstance(_eff_sid, str) and _eff_sid:
-                    result["session_id"] = _eff_sid
-                return result, usage
+                run_conversation_start = time.monotonic()
+                input_tokens_before = getattr(agent, "session_input_tokens", 0) or 0
+                output_tokens_before = getattr(agent, "session_output_tokens", 0) or 0
+                cache_read_tokens_before = getattr(agent, "session_cache_read_tokens", 0) or 0
+                cache_write_tokens_before = getattr(agent, "session_cache_write_tokens", 0) or 0
+                reasoning_tokens_before = getattr(agent, "session_reasoning_tokens", 0) or 0
+                total_tokens_before = getattr(agent, "session_total_tokens", 0) or 0
+                try:
+                    result = agent.run_conversation(
+                        user_message=user_message,
+                        conversation_history=conversation_history,
+                        task_id=effective_task_id,
+                    )
+                    logger.info(
+                        "[HermesTiming] request_id=%s step=agent_run_done session_id=%s cache=%s ms=%.1f elapsed_ms=%.1f",
+                        request_id,
+                        session_id,
+                        cache_status,
+                        _elapsed_ms(run_conversation_start),
+                        _elapsed_ms(run_start),
+                    )
+                    usage = {
+                        "input_tokens": max(
+                            0,
+                            (getattr(agent, "session_input_tokens", 0) or 0) - input_tokens_before,
+                        ),
+                        "output_tokens": max(
+                            0,
+                            (getattr(agent, "session_output_tokens", 0) or 0) - output_tokens_before,
+                        ),
+                        "cache_read_tokens": max(
+                            0,
+                            (getattr(agent, "session_cache_read_tokens", 0) or 0) - cache_read_tokens_before,
+                        ),
+                        "cache_write_tokens": max(
+                            0,
+                            (getattr(agent, "session_cache_write_tokens", 0) or 0) - cache_write_tokens_before,
+                        ),
+                        "reasoning_tokens": max(
+                            0,
+                            (getattr(agent, "session_reasoning_tokens", 0) or 0) - reasoning_tokens_before,
+                        ),
+                        "total_tokens": max(
+                            0,
+                            (getattr(agent, "session_total_tokens", 0) or 0) - total_tokens_before,
+                        ),
+                    }
+                    # Include the effective session ID in the result so callers
+                    # (e.g. X-Hermes-Session-Id header) can track compression-
+                    # triggered session rotations. (#16938)
+                    _eff_sid = getattr(agent, "session_id", session_id)
+                    if isinstance(_eff_sid, str) and _eff_sid:
+                        result["session_id"] = _eff_sid
+                    return result, usage
+                finally:
+                    if entry_lock is not None:
+                        entry_lock.release()
 
-        return await loop.run_in_executor(None, _run)
+        try:
+            return await loop.run_in_executor(None, _run)
+        finally:
+            logger.info(
+                "[HermesTiming] request_id=%s step=run_agent_exit session_id=%s elapsed_ms=%.1f",
+                request_id,
+                session_id,
+                _elapsed_ms(run_start),
+            )
 
     # ------------------------------------------------------------------
     # /v1/runs — structured event streaming
